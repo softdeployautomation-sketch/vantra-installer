@@ -1,0 +1,29 @@
+# --- Secrets / signing material — never commit these ---
+*.pfx
+*.p12
+*.key
+*.pem
+*.cer
+*.crt
+*.env
+.env.*
+secrets/
+*token*
+*apikey*
+*api_key*
+
+# --- Common build tooling output (adjust as your actual tools land) ---
+build/
+dist/
+out/
+*.msi
+*.wixobj
+*.wixpdb
+obj/
+bin/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

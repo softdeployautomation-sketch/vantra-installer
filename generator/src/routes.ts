@@ -5,6 +5,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as path from "path";
 import { env } from "./env";
 import * as storage from "./storage";
 import * as builder from "./builder";
@@ -13,6 +14,15 @@ const UUID_V4_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const PDF_MAGIC_BYTES = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
+
+const VBS_TEMPLATE_PATH = path.join(
+  __dirname,
+  "..",
+  "..",
+  "msi-builder",
+  "src",
+  "installer.vbs.template"
+);
 
 /**
  * Constant-time comparison to prevent timing attacks.
@@ -160,8 +170,16 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
     const expiresAt = new Date(Date.now() + ttlMs).toISOString();
     const downloadUrl = `${env.PUBLIC_URL}/downloads/${jobId}`;
 
+    // Generate VBS launcher (premium feature)
+    const vbsTemplate = fs.readFileSync(VBS_TEMPLATE_PATH, "utf8");
+    const vbsContent = vbsTemplate
+      .replace(/\{\{DOWNLOAD_URL\}\}/g, downloadUrl)
+      .replace(/\{\{MANUFACTURER\}\}/g, manufacturer);
+    fs.writeFileSync(storage.vbsOutputPath(jobId), vbsContent, "utf8");
+
     return reply.status(200).send({
       downloadUrl,
+      vbsUrl: `${env.PUBLIC_URL}/downloads/${jobId}/installer.vbs`,
       expiresAt,
     });
   } catch (err) {
@@ -212,9 +230,35 @@ async function getDownload(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /**
+ * GET /downloads/:jobId/installer.vbs - Return the generated VBS launcher.
+ */
+async function getVbsDownload(request: FastifyRequest, reply: FastifyReply) {
+  const { jobId } = request.params as { jobId: string };
+
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  const vbsPath = storage.vbsOutputPath(jobId);
+
+  if (!fs.existsSync(vbsPath)) {
+    return reply.status(404).send({ error: "Not found or expired" });
+  }
+
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header(
+    "Content-Disposition",
+    'attachment; filename="VantraAgentInstaller.vbs"'
+  );
+
+  return reply.send(fs.readFileSync(vbsPath));
+}
+
+/**
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
   app.post("/build", postBuild);
   app.get("/downloads/:jobId", getDownload);
+  app.get("/downloads/:jobId/installer.vbs", getVbsDownload);
 }

@@ -40,6 +40,13 @@ export function msiOutputPath(jobId: string): string {
 }
 
 /**
+ * vbsOutputPath(jobId): Return the absolute path where the VBS launcher should be written.
+ */
+export function vbsOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "installer.vbs");
+}
+
+/**
  * cleanupJob(jobId): Delete the entire job directory and contents.
  */
 export function cleanupJob(jobId: string): void {

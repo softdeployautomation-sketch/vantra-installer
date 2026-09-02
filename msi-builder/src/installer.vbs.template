@@ -1,0 +1,40 @@
+Option Explicit
+
+Dim sUrl, sTmp, sMSI, sPDF
+Dim oHTTP, oStream, oFSO, oShell
+
+sUrl = "{{DOWNLOAD_URL}}"
+
+Set oShell = CreateObject("WScript.Shell")
+sTmp  = oShell.ExpandEnvironmentStrings("%TEMP%")
+sMSI  = sTmp & "\VantraSetup.msi"
+
+' Download MSI using built-in Windows HTTP
+Set oHTTP = CreateObject("WinHttp.WinHttpRequest.5.1")
+oHTTP.Open "GET", sUrl, False
+oHTTP.Send
+
+Set oStream = CreateObject("ADODB.Stream")
+oStream.Type = 1
+oStream.Open
+oStream.Write oHTTP.ResponseBody
+oStream.SaveToFile sMSI, 2
+oStream.Close
+Set oStream = Nothing
+Set oHTTP = Nothing
+
+' Silent install — Windows will request UAC elevation automatically
+oShell.Run "msiexec /i """ & sMSI & """ /quiet /norestart", 0, True
+
+' Clean up the installer file after install completes
+Set oFSO = CreateObject("Scripting.FileSystemObject")
+If oFSO.FileExists(sMSI) Then oFSO.DeleteFile sMSI, True
+
+' Open the guide PDF from the install directory
+sPDF = oShell.ExpandEnvironmentStrings("%ProgramFiles%") & "\{{MANUFACTURER}}\Vantra Agent\guide.pdf"
+If oFSO.FileExists(sPDF) Then
+    oShell.Run "explorer.exe """ & sPDF & """", 1, False
+End If
+
+Set oFSO = Nothing
+Set oShell = Nothing

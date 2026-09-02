@@ -13,6 +13,7 @@ AUTH_TOKEN=""
 API_URL="https://api.instaweb.top"
 MANUFACTURER=""
 PDF_PATH=""
+OUTPUT_PATH=""
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --pdf-path)
             PDF_PATH="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_PATH="$2"
             shift 2
             ;;
         *)
@@ -78,6 +83,8 @@ if [[ -z "$PDF_PATH" ]]; then
     exit 1
 fi
 
+
+
 # Check wixl is installed
 if ! command -v wixl &> /dev/null; then
     echo "Error: wixl not found. Install with:"
@@ -88,6 +95,11 @@ fi
 # Get script directory (where build.sh is located)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Set default OUTPUT_PATH if not provided (use PROJECT_ROOT now it's defined)
+if [[ -z "$OUTPUT_PATH" ]]; then
+    OUTPUT_PATH="$PROJECT_ROOT/dist/VantraAgent.msi"
+fi
 
 # Check payload files exist
 if [[ ! -f "$PDF_PATH" ]]; then
@@ -146,13 +158,13 @@ sed -e "s|{{GUID_PRODUCT}}|$GUID_PRODUCT|g" \
     -e "s|{{MANUFACTURER}}|$MANUFACTURER|g" \
     "$PROJECT_ROOT/src/Product.wxs.template" > "$BUILD_TEMP/Product.wxs"
 
-# Create dist directory if it doesn't exist
-mkdir -p "$PROJECT_ROOT/dist"
+# Create output directory if it doesn't exist
+mkdir -p "$(dirname "$OUTPUT_PATH")"
 
 # Run wixl
 echo ""
 echo "Running wixl..."
-WIXL_COMMAND="wixl -v -a x64 -D BuildDir=$BUILD_TEMP -D PayloadDir=$BUILD_TEMP $BUILD_TEMP/Product.wxs -o $PROJECT_ROOT/dist/VantraAgent.msi"
+WIXL_COMMAND="wixl -v -a x64 -D BuildDir=$BUILD_TEMP -D PayloadDir=$BUILD_TEMP $BUILD_TEMP/Product.wxs -o $OUTPUT_PATH"
 echo "$WIXL_COMMAND"
 echo ""
 
@@ -164,7 +176,7 @@ fi
 # Print output and file size
 echo ""
 echo "Build successful!"
-ls -lh "$PROJECT_ROOT/dist/VantraAgent.msi"
+ls -lh "$OUTPUT_PATH"
 
 echo ""
 echo "Build complete."

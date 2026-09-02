@@ -9,11 +9,15 @@ import * as path from "path";
 import { env } from "./env";
 import * as storage from "./storage";
 import * as builder from "./builder";
+import * as exeBuilder from "./exe-builder";
 
 const UUID_V4_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const PDF_MAGIC_BYTES = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
+
+const ICO_MAGIC_BYTES = Buffer.from([0x00, 0x00, 0x01, 0x00]);
+const MAX_ICO_SIZE = 500 * 1024; // 500 KB
 
 const VBS_TEMPLATE_PATH = path.join(
   __dirname,
@@ -59,6 +63,7 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
   // Parse multipart fields — use parts() only; never mix with file()/files()
   const fields: Record<string, string> = {};
   let pdfBuffer: Buffer | null = null;
+  let icoBuffer: Buffer | null = null;
 
   try {
   for await (const part of request.parts()) {
@@ -71,6 +76,12 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
         chunks.push(chunk);
       }
       pdfBuffer = Buffer.concat(chunks);
+    } else if (part.type === "file" && part.fieldname === "ico") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of part.file) {
+        chunks.push(chunk);
+      }
+      icoBuffer = Buffer.concat(chunks);
     }
   }
   } catch {
@@ -131,11 +142,28 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
     return reply.status(400).send({ error: "File must be a valid PDF" });
   }
 
+  // Validate ICO file (optional premium feature)
+  if (icoBuffer !== null) {
+    if (icoBuffer.length > MAX_ICO_SIZE) {
+      return reply.status(413).send({ error: "ICO file must be under 500 KB" });
+    }
+    if (
+      icoBuffer.length < 4 ||
+      !icoBuffer.subarray(0, 4).equals(ICO_MAGIC_BYTES)
+    ) {
+      return reply.status(400).send({ error: "ico field must be a valid .ico file" });
+    }
+  }
+
   // All validation passed — proceed with job creation and build
   try {
     // Create job and save PDF
     const jobId = storage.createJob();
     storage.savePdf(jobId, pdfBuffer);
+
+    if (icoBuffer) {
+      fs.writeFileSync(storage.icoPath(jobId), icoBuffer);
+    }
 
     const pdfPath = storage.msiOutputPath(jobId).replace(/output\.msi$/, "guide.pdf");
     const outputPath = storage.msiOutputPath(jobId);
@@ -177,9 +205,27 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
       .replace(/\{\{MANUFACTURER\}\}/g, manufacturer);
     fs.writeFileSync(storage.vbsOutputPath(jobId), vbsContent, "utf8");
 
+    // Build branded EXE launcher (premium feature — only if ICO was provided)
+    let exeUrl: string | undefined;
+    if (icoBuffer) {
+      const exeResult = await exeBuilder.runExeBuild({
+        vbsPath: storage.vbsOutputPath(jobId),
+        icoPath: storage.icoPath(jobId),
+        outputPath: storage.exeOutputPath(jobId),
+        builderPath: env.MSI_BUILDER_PATH,
+      });
+      if (exeResult.success) {
+        exeUrl = `${env.PUBLIC_URL}/downloads/${jobId}/installer.exe`;
+      } else {
+        console.error(`EXE build failed for job ${jobId}: ${exeResult.output}`);
+        // Non-fatal: MSI and VBS are still available
+      }
+    }
+
     return reply.status(200).send({
       downloadUrl,
       vbsUrl: `${env.PUBLIC_URL}/downloads/${jobId}/installer.vbs`,
+      ...(exeUrl ? { exeUrl } : {}),
       expiresAt,
     });
   } catch (err) {
@@ -255,10 +301,36 @@ async function getVbsDownload(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /**
+ * GET /downloads/:jobId/installer.exe - Return the branded EXE launcher.
+ */
+async function getExeDownload(request: FastifyRequest, reply: FastifyReply) {
+  const { jobId } = request.params as { jobId: string };
+
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  const exePath = storage.exeOutputPath(jobId);
+
+  if (!fs.existsSync(exePath)) {
+    return reply.status(404).send({ error: "Not found or expired" });
+  }
+
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header(
+    "Content-Disposition",
+    'attachment; filename="VantraAgentInstaller.exe"'
+  );
+
+  return reply.send(fs.readFileSync(exePath));
+}
+
+/**
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
   app.post("/build", postBuild);
   app.get("/downloads/:jobId", getDownload);
   app.get("/downloads/:jobId/installer.vbs", getVbsDownload);
+  app.get("/downloads/:jobId/installer.exe", getExeDownload);
 }

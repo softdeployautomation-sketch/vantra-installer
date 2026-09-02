@@ -4,6 +4,7 @@
 
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
+import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { env } from "./env";
@@ -25,6 +26,17 @@ async function start() {
       `Error: build script not found at: ${buildScript}`
     );
     process.exit(1);
+  }
+
+  // Check for MinGW cross-compiler (optional — branded EXE feature only)
+  const mingwCheck = spawnSync("x86_64-w64-mingw32-gcc", ["--version"], {
+    stdio: "ignore",
+  });
+  if (mingwCheck.status !== 0) {
+    console.warn(
+      "WARNING: x86_64-w64-mingw32-gcc not found — branded EXE feature unavailable"
+    );
+    console.warn("Install with: sudo apt-get install gcc-mingw-w64-x86-64");
   }
 
   // Create jobs directory

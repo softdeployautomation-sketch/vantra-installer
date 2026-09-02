@@ -47,6 +47,20 @@ export function vbsOutputPath(jobId: string): string {
 }
 
 /**
+ * exeOutputPath(jobId): Return the absolute path where the branded EXE launcher should be written.
+ */
+export function exeOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "installer.exe");
+}
+
+/**
+ * icoPath(jobId): Return the absolute path where the custom company icon should be stored.
+ */
+export function icoPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "custom.ico");
+}
+
+/**
  * cleanupJob(jobId): Delete the entire job directory and contents.
  */
 export function cleanupJob(jobId: string): void {

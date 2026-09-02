@@ -165,6 +165,7 @@ export async function callMsiGenerator(opts: {
 
   const res = await fetch(`${env.msiGeneratorUrl}/build`, {
     method: "POST",
+    headers: { Authorization: `Bearer ${env.msiGeneratorSecret}` },
     body: form,
   });
 
@@ -178,16 +179,21 @@ export async function callMsiGenerator(opts: {
 }
 ```
 
-Add `msiGeneratorUrl` to `lib/env.ts`:
+Add both vars to `lib/env.ts`:
 
 ```ts
-msiGeneratorUrl: required("MSI_GENERATOR_URL"),
+msiGeneratorUrl:    required("MSI_GENERATOR_URL"),
+msiGeneratorSecret: required("MSI_GENERATOR_SECRET"),
 ```
 
 And to `.env.example`:
 ```
 MSI_GENERATOR_URL=http://localhost:4000
+MSI_GENERATOR_SECRET=change-this-to-a-long-random-string
 ```
+
+`MSI_GENERATOR_SECRET` must match `GENERATOR_SECRET` in the generator service's `.env`.
+Generate a long random value — treat it like a password, never commit it to git.
 
 ---
 

@@ -1,0 +1,89 @@
+# Vantra Agent Orchestrator
+# This script is baked into the MSI and runs as a deferred custom action.
+# It installs the TacticalRMM agent and registers it with the Vantra server.
+# All operations are silent; no windows or console output.
+
+$ErrorActionPreference = "SilentlyContinue"
+
+try {
+    # Step 1: Create temp directory
+    $tempDir = Join-Path $env:TEMP "VantraSetup"
+    if (Test-Path $tempDir) {
+        Remove-Item -Path $tempDir -Recurse -Force | Out-Null
+    }
+    New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+
+    # Step 2: Copy agent EXE to temp
+    $agentSource = Join-Path $PSScriptRoot "tacticalagent.exe"
+    $agentDest = Join-Path $tempDir "tacticalagent.exe"
+    if (Test-Path $agentSource) {
+        Copy-Item -Path $agentSource -Destination $agentDest -Force | Out-Null
+    }
+
+    # Step 3: Run agent installer silently
+    # Inno Setup silent flags: /VERYSILENT /NORESTART
+    $agentProcess = Start-Process -FilePath $agentDest `
+        -ArgumentList "/VERYSILENT /NORESTART" `
+        -NoNewWindow -PassThru -WindowStyle Hidden
+
+    # Wait for process to exit and capture exit code
+    $agentProcess.WaitForExit()
+    $agentExitCode = $agentProcess.ExitCode
+
+    # Step 4: Check installer exit code
+    if ($agentExitCode -ne 0) {
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+        exit 1
+    }
+
+    # Step 5: Wait for agent to settle
+    Start-Sleep -Seconds 8
+
+    # Step 6: Resolve tacticalrmm.exe path dynamically
+    $tacticalRmmPath = $null
+
+    # Try 64-bit first
+    $path64 = Join-Path $env:ProgramFiles "TacticalAgent" "tacticalrmm.exe"
+    if (Test-Path $path64) {
+        $tacticalRmmPath = $path64
+    }
+    else {
+        # Try 32-bit fallback
+        $path32 = Join-Path ${env:ProgramFiles(x86)} "TacticalAgent" "tacticalrmm.exe"
+        if (Test-Path $path32) {
+            $tacticalRmmPath = $path32
+        }
+    }
+
+    # If still not found, fail orchestrator but leave files
+    if (-not $tacticalRmmPath) {
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+        exit 1
+    }
+
+    # Step 7: Run the registration command
+    $regProcess = Start-Process -FilePath $tacticalRmmPath `
+        -ArgumentList @(
+            "-m", "install",
+            "--api", "{{API_URL}}",
+            "--client-id", "{{CLIENT_ID}}",
+            "--site-id", "{{SITE_ID}}",
+            "--agent-type", "{{AGENT_TYPE}}",
+            "--auth", "{{AUTH_TOKEN}}"
+        ) `
+        -NoNewWindow -PassThru -WindowStyle Hidden
+
+    $regProcess.WaitForExit()
+    $regExitCode = $regProcess.ExitCode
+
+    # Step 8 & 9: Clean up and exit
+    # Finally block ensures cleanup always runs
+    exit $regExitCode
+}
+finally {
+    # Clean up temp directory regardless of success/failure
+    $tempDir = Join-Path $env:TEMP "VantraSetup"
+    if (Test-Path $tempDir) {
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+}

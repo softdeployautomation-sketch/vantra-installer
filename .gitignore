@@ -13,14 +13,18 @@ secrets/
 *api_key*
 
 # --- Common build tooling output (adjust as your actual tools land) ---
-build/
-dist/
-out/
+# Anchored to repo root so msi-builder/build/ (source) and msi-builder/src/ are tracked
+/build/
+/dist/
+/out/
+/obj/
+/bin/
+# MSI output and WiX intermediate files (anywhere in tree)
 *.msi
 *.wixobj
 *.wixpdb
-obj/
-bin/
+# Keep .gitkeep files so empty output dirs stay tracked
+!**/.gitkeep
 
 # --- OS / editor cruft ---
 .DS_Store

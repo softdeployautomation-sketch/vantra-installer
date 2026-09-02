@@ -3,7 +3,7 @@ Option Explicit
 Dim sUrl, sTmp, sMSI, sPDF
 Dim oHTTP, oStream, oFSO, oShell
 
-sUrl = "{{DOWNLOAD_URL}}"
+sUrl = {{DOWNLOAD_URL_EXPR}}
 
 Set oShell = CreateObject("WScript.Shell")
 sTmp  = oShell.ExpandEnvironmentStrings("%TEMP%")

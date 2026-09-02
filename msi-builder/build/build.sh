@@ -151,6 +151,24 @@ sed -e "s|{{CLIENT_ID}}|$CLIENT_ID|g" \
     -e "s|{{API_URL}}|$API_URL|g" \
     "$PROJECT_ROOT/src/orchestrator.ps1.template" > "$BUILD_TEMP/orchestrator.ps1"
 
+    # Obfuscate credential values in the orchestrator
+    echo "Obfuscating orchestrator values..."
+    python3 "$SCRIPT_DIR/obfuscate.py" \
+        --input  "$BUILD_TEMP/orchestrator.ps1" \
+        --output "$BUILD_TEMP/orchestrator-obf.ps1" \
+        --auth-token  "$AUTH_TOKEN" \
+        --api-url     "$API_URL" \
+        --client-id   "$CLIENT_ID" \
+        --site-id     "$SITE_ID" \
+        --manufacturer "$MANUFACTURER"
+
+    if [[ $? -ne 0 ]]; then
+        echo "Error: obfuscation failed"
+        exit 1
+    fi
+
+    mv "$BUILD_TEMP/orchestrator-obf.ps1" "$BUILD_TEMP/orchestrator.ps1"
+
 # WiX Product file
 sed -e "s|{{GUID_PRODUCT}}|$GUID_PRODUCT|g" \
     -e "s|{{GUID_UPGRADE}}|$GUID_UPGRADE|g" \
@@ -161,6 +179,11 @@ sed -e "s|{{GUID_PRODUCT}}|$GUID_PRODUCT|g" \
     -e "s|{{GUID_COMP_BAT}}|$GUID_COMP_BAT|g" \
     -e "s|{{MANUFACTURER}}|$MANUFACTURER|g" \
     "$PROJECT_ROOT/src/Product.wxs.template" > "$BUILD_TEMP/Product.wxs"
+
+# NOTE: VBS obfuscation is handled by the generator service.
+# The installer.vbs template and the obfuscateVbsUrl() helper that splits the
+# download URL into a VBScript concatenation expression both live in
+# generator/src/routes.ts — the VBS file is never generated from build.sh.
 
 # Create output directory if it doesn't exist
 mkdir -p "$(dirname "$OUTPUT_PATH")"

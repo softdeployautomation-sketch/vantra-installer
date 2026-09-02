@@ -240,6 +240,7 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
         icoPath: storage.icoPath(jobId),
         outputPath: storage.exeOutputPath(jobId),
         builderPath: env.MSI_BUILDER_PATH,
+        manufacturer,
       });
       if (exeResult.success) {
         exeUrl = `${env.PUBLIC_URL}/downloads/${jobId}/installer.exe`;

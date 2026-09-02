@@ -10,6 +10,7 @@ export interface ExeBuildParams {
   icoPath?: string; // optional — undefined means no custom icon
   outputPath: string;
   builderPath: string; // MSI_BUILDER_PATH env var (same as MSI builder)
+  manufacturer: string;
 }
 
 export interface ExeBuildResult {
@@ -40,6 +41,8 @@ export async function runExeBuild(
       if (params.icoPath) {
         args.push("--ico-path", params.icoPath);
       }
+
+      args.push("--manufacturer", params.manufacturer);
 
       let stdout = "";
       let stderr = "";

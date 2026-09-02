@@ -14,6 +14,12 @@
             InstallScope="perMachine"
             Platform="x64" />
 
+        <Property Id="ARPPUBLISHER"    Value="{{MANUFACTURER}}" />
+        <Property Id="ARPURLINFOABOUT" Value="https://vantra.io" />
+        <Property Id="ARPHELPLINK"     Value="https://vantra.io/support" />
+        <Property Id="ARPCONTACT"      Value="support@vantra.io" />
+        <Property Id="ARPCOMMENTS"     Value="Remote management agent installed by {{MANUFACTURER}}" />
+
         <!-- Allow upgrades to newer versions, block downgrades -->
         <MajorUpgrade
             DowngradeErrorMessage="A newer version of Vantra Agent is already installed." />

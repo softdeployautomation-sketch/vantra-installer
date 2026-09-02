@@ -1,20 +1,24 @@
 # Payload folder
 
-Place these files here before running a build. Use these exact names:
+Place this one file here before running any build:
 
 | File | What it is |
 |---|---|
-| `guide.pdf` | The customer-facing install guide / Vantra onboarding document |
-| `tacticalagent.exe` | The TacticalRMM agent EXE downloaded from your TacticalRMM server for this deployment |
+| `tacticalagent.exe` | The TacticalRMM agent EXE from your TacticalRMM server |
 
-The `tacticalagent.exe` filename is fixed — rename the downloaded file to exactly this.
-The downloaded file from TacticalRMM is typically named something like
-`tacticalagent-v2.11.0-windows-amd64.exe` — rename it to `tacticalagent.exe` when you
-place it here.
+Rename the downloaded file (typically `tacticalagent-v2.x.x-windows-amd64.exe`) to
+exactly `tacticalagent.exe` when placing it here. This file is static — it does not
+change per deployment.
 
-**Do not place API tokens, credentials, or `.env` files here.** Those are passed as
-arguments to the build script at runtime, not stored in this folder.
+## The PDF is NOT placed here
 
-Nothing in this folder is committed to git (the `.gitignore` at the repo root excludes
-`.exe` and `.msi` files in build/dist directories, and you should not commit the agent
-binary anyway — it is generated fresh per deployment from your TacticalRMM server).
+The customer guide PDF is uploaded by the user through the Vantra dashboard and passed
+to the build script as a path argument (`--pdf-path`). It does not live in this folder.
+The build script copies whatever PDF the user provides into the temp build directory,
+renames it to `guide.pdf`, and bakes it into the MSI.
+
+## What not to put here
+
+Do not place API tokens, credentials, `.env` files, or the generated `.msi` here.
+The `tacticalagent.exe` binary itself should not be committed to git — add it to this
+folder on the build server directly.

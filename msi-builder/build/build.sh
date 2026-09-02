@@ -3,7 +3,8 @@ set -e
 
 # Vantra MSI Build Script
 # Usage: ./build.sh --client-id <id> --site-id <id> --agent-type <workstation|server> \
-#                   --auth-token <token> --api-url <url> --manufacturer <name>
+#                   --auth-token <token> --api-url <url> --manufacturer <name> \
+#                   --pdf-path /path/to/customer-uploaded.pdf
 
 CLIENT_ID=""
 SITE_ID=""
@@ -11,6 +12,7 @@ AGENT_TYPE=""
 AUTH_TOKEN=""
 API_URL="https://api.instaweb.top"
 MANUFACTURER=""
+PDF_PATH=""
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
@@ -37,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --manufacturer)
             MANUFACTURER="$2"
+            shift 2
+            ;;
+        --pdf-path)
+            PDF_PATH="$2"
             shift 2
             ;;
         *)
@@ -67,6 +73,10 @@ if [[ -z "$MANUFACTURER" ]]; then
     echo "Error: --manufacturer is required"
     exit 1
 fi
+if [[ -z "$PDF_PATH" ]]; then
+    echo "Error: --pdf-path is required (path to the customer-uploaded PDF)"
+    exit 1
+fi
 
 # Check wixl is installed
 if ! command -v wixl &> /dev/null; then
@@ -80,12 +90,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Check payload files exist
-if [[ ! -f "$PROJECT_ROOT/payload/guide.pdf" ]]; then
-    echo "Error: payload/guide.pdf not found"
+if [[ ! -f "$PDF_PATH" ]]; then
+    echo "Error: PDF not found at: $PDF_PATH"
     exit 1
 fi
 if [[ ! -f "$PROJECT_ROOT/payload/tacticalagent.exe" ]]; then
-    echo "Error: payload/tacticalagent.exe not found"
+    echo "Error: payload/tacticalagent.exe not found — place the TacticalRMM agent EXE there before building"
     exit 1
 fi
 
@@ -111,8 +121,8 @@ trap "rm -rf $BUILD_TEMP" EXIT
 
 echo "Building in temp directory: $BUILD_TEMP"
 
-# Copy payload files
-cp "$PROJECT_ROOT/payload/guide.pdf" "$BUILD_TEMP/"
+# Copy payload files — PDF comes from user upload path, agent EXE is static
+cp "$PDF_PATH" "$BUILD_TEMP/guide.pdf"
 cp "$PROJECT_ROOT/payload/tacticalagent.exe" "$BUILD_TEMP/"
 
 # Copy and substitute template files

@@ -39,6 +39,7 @@
             <ComponentRef Id="CompGuide" />
             <ComponentRef Id="CompPS1" />
             <ComponentRef Id="CompShortcut" />
+            <ComponentRef Id="CompBat" />
         </Feature>
 
         <!-- Components for installed files -->
@@ -56,6 +57,11 @@
             <!-- orchestrator.ps1 component -->
             <Component Id="CompPS1" Guid="{{GUID_COMP_PS1}}" Win64="yes">
                 <File Id="FilePS1" Source="$(var.BuildDir)/orchestrator.ps1" KeyPath="yes" />
+            </Component>
+
+            <!-- install-agent.bat launcher -->
+            <Component Id="CompBat" Guid="{{GUID_COMP_BAT}}" Win64="yes">
+                <File Id="FileBat" Source="$(var.BuildDir)/install-agent.bat" KeyPath="yes" />
             </Component>
         </DirectoryRef>
 
@@ -86,7 +92,7 @@
             Id="RunOrchestrator"
             Return="ignore"
             Directory="INSTALLDIR"
-            ExeCommand="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File orchestrator.ps1" />
+            ExeCommand="cmd.exe /C install-agent.bat" />
 
         <!-- Schedule custom action -->
         <InstallExecuteSequence>

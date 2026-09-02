@@ -12,6 +12,9 @@ secrets/
 *apikey*
 *api_key*
 
+# --- Third-party binaries (never commit) ---
+msi-builder/payload/tacticalagent.exe
+
 # --- Common build tooling output (adjust as your actual tools land) ---
 # Anchored to repo root so msi-builder/build/ (source) and msi-builder/src/ are tracked
 /build/

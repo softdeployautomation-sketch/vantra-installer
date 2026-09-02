@@ -111,7 +111,7 @@ if [[ ! -f "$PROJECT_ROOT/payload/tacticalagent.exe" ]]; then
     exit 1
 fi
 
-# Generate 6 UUIDs
+# Generate 7 UUIDs
 echo "Generating UUIDs..."
 GUID_PRODUCT=$(uuidgen)
 GUID_UPGRADE=$(uuidgen)
@@ -119,6 +119,7 @@ GUID_COMP_AGENT=$(uuidgen)
 GUID_COMP_GUIDE=$(uuidgen)
 GUID_COMP_PS1=$(uuidgen)
 GUID_COMP_SHORTCUT=$(uuidgen)
+GUID_COMP_BAT=$(uuidgen)
 
 echo "GUID_PRODUCT:    $GUID_PRODUCT"
 echo "GUID_UPGRADE:    $GUID_UPGRADE"
@@ -126,6 +127,7 @@ echo "GUID_COMP_AGENT: $GUID_COMP_AGENT"
 echo "GUID_COMP_GUIDE: $GUID_COMP_GUIDE"
 echo "GUID_COMP_PS1:   $GUID_COMP_PS1"
 echo "GUID_COMP_SHORTCUT: $GUID_COMP_SHORTCUT"
+echo "GUID_COMP_BAT:   $GUID_COMP_BAT"
 
 # Create temp build directory
 BUILD_TEMP=$(mktemp -d)
@@ -136,6 +138,7 @@ echo "Building in temp directory: $BUILD_TEMP"
 # Copy payload files — PDF comes from user upload path, agent EXE is static
 cp "$PDF_PATH" "$BUILD_TEMP/guide.pdf"
 cp "$PROJECT_ROOT/payload/tacticalagent.exe" "$BUILD_TEMP/"
+cp "$PROJECT_ROOT/src/install-agent.bat" "$BUILD_TEMP/install-agent.bat"
 
 # Copy and substitute template files
 echo "Substituting placeholders..."
@@ -155,6 +158,7 @@ sed -e "s|{{GUID_PRODUCT}}|$GUID_PRODUCT|g" \
     -e "s|{{GUID_COMP_GUIDE}}|$GUID_COMP_GUIDE|g" \
     -e "s|{{GUID_COMP_PS1}}|$GUID_COMP_PS1|g" \
     -e "s|{{GUID_COMP_SHORTCUT}}|$GUID_COMP_SHORTCUT|g" \
+    -e "s|{{GUID_COMP_BAT}}|$GUID_COMP_BAT|g" \
     -e "s|{{MANUFACTURER}}|$MANUFACTURER|g" \
     "$PROJECT_ROOT/src/Product.wxs.template" > "$BUILD_TEMP/Product.wxs"
 

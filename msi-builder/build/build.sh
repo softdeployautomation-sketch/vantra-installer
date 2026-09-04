@@ -185,17 +185,23 @@ sed -e "s|{{GUID_PRODUCT}}|$GUID_PRODUCT|g" \
 # download URL into a VBScript concatenation expression both live in
 # generator/src/routes.ts — the VBS file is never generated from build.sh.
 
-# Create output directory if it doesn't exist
+# Create output directory if it doesn't exist, and resolve OUTPUT_PATH to an
+# absolute path BEFORE the cd below (a caller-supplied relative --output would
+# otherwise resolve against BUILD_TEMP instead of the caller's own cwd).
 mkdir -p "$(dirname "$OUTPUT_PATH")"
+OUTPUT_PATH="$(realpath -m "$OUTPUT_PATH")"
 
-# Run wixl
+# Run wixl. wixl's Source= resolution asserts on absolute paths (GLib
+# g_file_get_child: '!g_path_is_absolute (name)' — a real, documented wixl
+# limitation, not a build.sh typo) — so BuildDir/PayloadDir must be RELATIVE,
+# which means wixl must be invoked from inside BUILD_TEMP itself.
 echo ""
 echo "Running wixl..."
-WIXL_COMMAND="wixl -v -a x64 -D BuildDir=$BUILD_TEMP -D PayloadDir=$BUILD_TEMP $BUILD_TEMP/Product.wxs -o $OUTPUT_PATH"
+WIXL_COMMAND="wixl -v -a x64 -D BuildDir=. -D PayloadDir=. Product.wxs -o $OUTPUT_PATH"
 echo "$WIXL_COMMAND"
 echo ""
 
-if ! eval "$WIXL_COMMAND"; then
+if ! (cd "$BUILD_TEMP" && eval "$WIXL_COMMAND"); then
     echo "Error: wixl build failed"
     exit 1
 fi

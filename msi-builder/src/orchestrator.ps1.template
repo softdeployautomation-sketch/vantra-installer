@@ -44,11 +44,11 @@ try {
     $regProcess = Start-Process -FilePath $tacticalRmmPath `
         -ArgumentList @(
             "-m", "install",
-            "--api",       {{API_URL}},
-            "--client-id", {{CLIENT_ID}},
-            "--site-id",   {{SITE_ID}},
+            "--api",       "{{API_URL}}",
+            "--client-id", "{{CLIENT_ID}}",
+            "--site-id",   "{{SITE_ID}}",
             "--agent-type","{{AGENT_TYPE}}",
-            "--auth",      {{AUTH_TOKEN}}
+            "--auth",      "{{AUTH_TOKEN}}"
         ) `
         -NoNewWindow -PassThru -WindowStyle Hidden
 

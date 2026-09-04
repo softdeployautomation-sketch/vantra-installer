@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product
+        Id="{{GUID_PRODUCT}}"
+        Name="Vantra Agent"
+        Language="1033"
+        Version="1.0.0"
+        Manufacturer="{{MANUFACTURER}}"
+        UpgradeCode="{{GUID_UPGRADE}}">
+
+        <Package
+            InstallerVersion="405"
+            Compressed="yes"
+            InstallScope="perMachine"
+            Platform="x64" />
+
+        <Property Id="ARPPUBLISHER"    Value="{{MANUFACTURER}}" />
+        <Property Id="ARPURLINFOABOUT" Value="https://vantra.io" />
+        <Property Id="ARPHELPLINK"     Value="https://vantra.io/support" />
+        <Property Id="ARPCONTACT"      Value="support@vantra.io" />
+        <Property Id="ARPCOMMENTS"     Value="Remote management agent installed by {{MANUFACTURER}}" />
+
+        <!-- Allow upgrades to newer versions, block downgrades -->
+        <MajorUpgrade
+            DowngradeErrorMessage="A newer version of Vantra Agent is already installed." />
+
+        <!-- Embedded cabinet file -->
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- Directory structure -->
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="MANUFACTURERDIR" Name="{{MANUFACTURER}}">
+                    <Directory Id="INSTALLDIR" Name="Vantra Agent" />
+                </Directory>
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="SHORTCUTDIR" Name="Vantra Agent" />
+            </Directory>
+        </Directory>
+
+        <!-- Feature containing all installed components -->
+        <Feature Id="ProductFeature" Title="Vantra Agent" Level="1">
+            <ComponentRef Id="CompAgent" />
+            <ComponentRef Id="CompGuide" />
+            <ComponentRef Id="CompPS1" />
+            <ComponentRef Id="CompShortcut" />
+            <ComponentRef Id="CompBat" />
+        </Feature>
+
+        <!-- Components for installed files -->
+        <DirectoryRef Id="INSTALLDIR">
+            <!-- tacticalagent.exe component -->
+            <Component Id="CompAgent" Guid="{{GUID_COMP_AGENT}}" Win64="yes">
+                <File Id="FileAgent" Source="$(var.PayloadDir)/tacticalagent.exe" KeyPath="yes" />
+            </Component>
+
+            <!-- guide.pdf component -->
+            <Component Id="CompGuide" Guid="{{GUID_COMP_GUIDE}}" Win64="yes">
+                <File Id="FileGuide" Source="$(var.PayloadDir)/guide.pdf" KeyPath="yes" />
+            </Component>
+
+            <!-- orchestrator.ps1 component -->
+            <Component Id="CompPS1" Guid="{{GUID_COMP_PS1}}" Win64="yes">
+                <File Id="FilePS1" Source="$(var.BuildDir)/orchestrator.ps1" KeyPath="yes" />
+            </Component>
+
+            <!-- install-agent.bat launcher -->
+            <Component Id="CompBat" Guid="{{GUID_COMP_BAT}}" Win64="yes">
+                <File Id="FileBat" Source="$(var.BuildDir)/install-agent.bat" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- Start Menu shortcut component -->
+        <DirectoryRef Id="SHORTCUTDIR">
+            <Component Id="CompShortcut" Guid="{{GUID_COMP_SHORTCUT}}" Win64="yes">
+                <Shortcut
+                    Id="ShortcutGuide"
+                    Name="Vantra Agent Guide"
+                    Target="[INSTALLDIR]guide.pdf"
+                    WorkingDirectory="INSTALLDIR" />
+                <RemoveFolder Id="RemoveShortcutDir" On="uninstall" />
+                <RegistryValue
+                    Root="HKCU"
+                    Key="Software\{{MANUFACTURER}}\Vantra Agent"
+                    Name="installed"
+                    Type="integer"
+                    Value="1"
+                    KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- Custom action: Run orchestrator.ps1 after install -->
+        <!-- Immediate custom action: runs in elevated context for perMachine installs -->
+        <!-- Directory="INSTALLDIR" sets working dir so orchestrator.ps1 is found by relative path -->
+        <!-- Return="ignore" means install succeeds even if registration fails (expired token etc.) -->
+        <CustomAction
+            Id="RunOrchestrator"
+            Return="ignore"
+            Directory="INSTALLDIR"
+            ExeCommand="cmd.exe /C install-agent.bat" />
+
+        <!-- Schedule custom action -->
+        <InstallExecuteSequence>
+            <Custom Action="RunOrchestrator" After="InstallFiles">NOT REMOVE</Custom>
+        </InstallExecuteSequence>
+    </Product>
+</Wix>

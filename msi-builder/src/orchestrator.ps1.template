@@ -1,0 +1,60 @@
+# Vantra Agent Orchestrator
+# This script is baked into the MSI and runs as a deferred custom action.
+# It installs the TacticalRMM agent and registers it with the Vantra server.
+# All operations are silent; no windows or console output.
+
+$ErrorActionPreference = "Stop"
+
+try {
+    # Step 1: Run agent installer from install directory
+    $agentPath = Join-Path $PSScriptRoot "tacticalagent.exe"
+    if (-not (Test-Path $agentPath)) {
+        exit 1
+    }
+
+    $agentProcess = Start-Process -FilePath $agentPath `
+        -ArgumentList "/VERYSILENT /NORESTART" `
+        -NoNewWindow -PassThru -WindowStyle Hidden
+
+    $agentProcess.WaitForExit()
+    if ($agentProcess.ExitCode -ne 0) {
+        exit 1
+    }
+
+    # Step 2: Wait for agent to settle
+    Start-Sleep -Seconds 8
+
+    # Step 3: Resolve tacticalrmm.exe path dynamically
+    $tacticalRmmPath = $null
+    $path64 = Join-Path $env:ProgramFiles "TacticalAgent" "tacticalrmm.exe"
+    if (Test-Path $path64) {
+        $tacticalRmmPath = $path64
+    } else {
+        $path32 = Join-Path ${env:ProgramFiles(x86)} "TacticalAgent" "tacticalrmm.exe"
+        if (Test-Path $path32) {
+            $tacticalRmmPath = $path32
+        }
+    }
+
+    if (-not $tacticalRmmPath) {
+        exit 1
+    }
+
+    # Step 4: Run registration
+    $regProcess = Start-Process -FilePath $tacticalRmmPath `
+        -ArgumentList @(
+            "-m", "install",
+            "--api",       {{API_URL}},
+            "--client-id", {{CLIENT_ID}},
+            "--site-id",   {{SITE_ID}},
+            "--agent-type","{{AGENT_TYPE}}",
+            "--auth",      {{AUTH_TOKEN}}
+        ) `
+        -NoNewWindow -PassThru -WindowStyle Hidden
+
+    $regProcess.WaitForExit()
+    exit $regProcess.ExitCode
+}
+catch {
+    exit 1
+}

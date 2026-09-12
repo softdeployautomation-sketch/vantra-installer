@@ -17,10 +17,11 @@ Implemented on branch `installer-dev` (PR installer-dev → main). STAGE 1 only 
 
 ### Task A — script committed
 `generator/src/New-AgentShortcut.ps1` (6202→~6216 lines) committed.
-`-SelfTest` result: **PENDING pwsh host** — `pwsh` is NOT installed on the dev host this agent
-ran on (`which pwsh` → not found), and only a Linux/Ubuntu pwsh host is authoritative. **Open item
-for a Linux/Ubuntu pwsh host**: run `pwsh ./New-AgentShortcut.ps1 -SelfTest` and record the real
-pass/fail count here. (Script header still notes 47/47 / 48/48 older counts — do not trust those,
+`-SelfTest` result: **48/48 PASSED, 0 failed** — run on **PowerShell 7.6.5** (snap) on the Ubuntu
+22.04 VPS (`root@164.68.105.96`, host `vmi3548623` x86_64) on **2026-09-12** against the committed
+artifact (`md5 b52d55121cfe64a2a97d2df65de1b514`, verified byte-identical to
+`generator/src/New-AgentShortcut.ps1`). Full output in `/root/selftest.log`. The script header's
+older 47/47 / 48/48 counts are superseded by this live run.
 record the live number.)
 
 ### Task B — `-InstallCmd` (+ `-AuthToken`) added to the script
@@ -33,8 +34,9 @@ record the live number.)
   is spliced verbatim into the obfuscated `$logic` — functionally running that enroll. Documented in-script.
 - `$AuthToken` added to the plaintext-leak needles (~line 5941) — the whole logic is XOR+Base64
   wrapped so the token never ships in plaintext; this is defense-in-depth.
-- **Re-run `-SelfTest` after the edit on a pwsh host** (same pending item above); regenerate + verify
-  the artifact there.
+- **Re-run `-SelfTest` after the edit on a pwsh host** — **DONE** (see Task A above): **48/48 passed,
+  0 failed** on PowerShell 7.6.5 (Ubuntu 22.04 VPS), confirming the `-InstallCmd`/`-AuthToken` edit
+  did not regress the artifact.
 
 ### Task C — bearer-authed JSON `POST /build` (ZIP) in the Fastify generator
 - Added startup check (`server.ts`) that `pwsh` exists, mirroring `MSI_BUILDER_PATH` (fatal exit if missing).
@@ -342,12 +344,13 @@ web-app repo (`Mikeolab/vantra`). Repo for **vanta-installer** = `softdeployauto
 - `lib/env.ts`: reuses `MSI_GENERATOR_URL/SECRET`; adds `zipGeneratorUrl` (only differs if a
   separate host).
 
-## `-SelfTest` count — **STILL PENDING pwsh host**
+## `-SelfTest` count — **DONE: 48/48 PASSED, 0 failed**
 
-`pwsh` (PowerShell 7) is **not installed on the authoring macOS dev host** (`which pwsh` → not
-found), same as STAGE 1 — so the live `pwsh ./New-AgentShortcut.ps1 -SelfTest` pass/fail count
-**cannot be produced here** and is NOT fabricated. Must be run on the Linux/Ubuntu generator
-host (which already requires pwsh) and recorded here (both after Task B and after re-validation).
+Run on **PowerShell 7.6.5** (snap) on the Ubuntu 22.04 VPS (`root@164.68.105.96`,
+host `vmi3548623`, x86_64) on **2026-09-12**, against the byte-identical committed artifact
+(`generator/src/New-AgentShortcut.ps1`, `md5 b52d55121cfe64a2a97d2df65de1b514`):
+`pwsh -NoProfile -NoLogo -NonInteractive ./New-AgentShortcut.ps1 -SelfTest` → exit 0, log
+`/root/selftest.log`. This covers both Task A and the Task B edit (STAGE 2 did not modify the .ps1).
 
 ## Decisions taken this stage
 
@@ -364,6 +367,5 @@ host (which already requires pwsh) and recorded here (both after Task B and afte
 - [ ] The **production `REDIRECT_BASE_URL`** (separate redirector host that 302s `/d/<jobId>` → `<PUBLIC_URL>/downloads/<jobId>/zip`).
 - [ ] Sign-off on `-InstallCmd` / AMSI default `none`.
 - [ ] **Plan gating**: ZIP free or premium.
-- [ ] A **pwsh host** to run the `-SelfTest` and record the real count.
 - [ ] AMSI default for production: recommend `none` unless he overrides.
 | `vanta/lib/trmm.ts` | `toPowerShellInstallCommand` (lines 139–150) | Builds the PS install command. |

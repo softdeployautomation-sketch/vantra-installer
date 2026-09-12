@@ -594,10 +594,16 @@ async function getZipDownload(request: FastifyRequest, reply: FastifyReply) {
  * GET /d/:jobId - Masked zip link.
  *
  * The handed URL uses a redirector base (REDIRECT_BASE_URL) so the generator's
- * origin isn't visible. In dev/lab the generator serves /d/:jobId itself as a
+ * origin isn't visible. In dev/lab the generator serves /d/:jobId itself via a
  * 302 to the zip endpoint; in production a separate redirector host owns /d/
  * and 302s to <PUBLIC_URL>/downloads/:jobId/zip. Either way the end user only
  * ever sees the masked host.
+ *
+ * NOTE: the redirect MUST be absolute and built from PUBLIC_URL (NOT a bare
+ * relative path). PUBLIC_URL is the configured public base (it may include a
+ * reverse-proxy path prefix such as `/msi-generator`, which the proxy strips
+ * before reaching this service). A relative redirect would drop that prefix and
+ * 404 behind such a proxy.
  */
 async function getMaskedZipRedirect(
   request: FastifyRequest,
@@ -609,7 +615,7 @@ async function getMaskedZipRedirect(
     return reply.status(400).send({ error: "Invalid job ID" });
   }
 
-  return reply.redirect(`/downloads/${jobId}/zip`, 302);
+  return reply.redirect(`${env.PUBLIC_URL}/downloads/${jobId}/zip`, 302);
 }
 
 /**

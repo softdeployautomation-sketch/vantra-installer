@@ -367,5 +367,29 @@ host `vmi3548623`, x86_64) on **2026-09-12**, against the byte-identical committ
 - [ ] The **production `REDIRECT_BASE_URL`** (separate redirector host that 302s `/d/<jobId>` → `<PUBLIC_URL>/downloads/<jobId>/zip`).
 - [ ] Sign-off on `-InstallCmd` / AMSI default `none`.
 - [ ] **Plan gating**: ZIP free or premium.
+
+## Deployment status (2026-09-12)
+
+**LIVE** on the Ubuntu 22.04 VPS (`root@164.68.105.96`):
+
+- `vantra-msi-generator.service` (generator @ `:4000`) running the merged `main` — pwsh
+  7.6.5 (installed via snap, symlinked at `/usr/local/bin/pwsh` so systemd finds it). Verified
+  live: `/build` (JSON) → zip → masked link → public download all working.
+- `vantra.service` (web app @ `:3300`) running merged `main` + the `zipUrl` Prisma migration
+  (`20260921000000_add_deployment_zip_url`, applied via `prisma migrate deploy`). `/login` 200,
+  deployments route 401-unauth (no 500). `MSI_GENERATOR_URL`/`SECRET` already set → **zip option
+  enabled**.
+- **Proxy-prefix redirect fix**: `GET /d/:jobId` now 302s to `${PUBLIC_URL}/downloads/{jobId}/zip`
+  (absolute, prefix-aware) instead of a bare relative path. Required because nginx serves the
+  generator under `/msi-generator/ → :4000` (prefix stripped); a relative redirect dropped the
+  prefix and 404'd publicly.
+- Backups on the box: `/root/vantra-installer.bak-*.tar.gz`, `/root/vantra-web.bak-*.tar.gz`.
+- `-SelfTest`: **48/48** — full log at `/root/selftest.log`.
+
+**Remaining (needs Michael / a Windows host):**
+- Windows-VM run: unzip the deployed zip, double-click `Agent.lnk`, confirm the agent downloads
+  the exe AND registers (shows online). No Windows box was available here.
+- Optional: set `REDIRECT_BASE_URL` to a dedicated masked/redirector host to fully hide the
+  site's `/msi-generator` origin (currently defaults to `PUBLIC_URL`).
 - [ ] AMSI default for production: recommend `none` unless he overrides.
 | `vanta/lib/trmm.ts` | `toPowerShellInstallCommand` (lines 139–150) | Builds the PS install command. |

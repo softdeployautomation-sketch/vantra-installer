@@ -80,6 +80,10 @@ Right now, Vantra generates a per-device download link (`https://api.instaweb.to
 - Check that `.gitignore` actually covers your tooling's real output/cache paths — the defaults here are a starting guess (common cert extensions, `build/`/`dist/`/`.msi` output folders), not a guarantee your specific toolchain won't leave something sensitive somewhere unexpected.
 - **If you ever accidentally commit a secret, say so immediately** rather than just deleting it in a follow-up commit — it needs to be rotated (a new key/cert issued), not just hidden from view, since it's still recoverable from git history.
 
+## The Vantra web app repo — you can read it, but not push to it
+
+You've also been given **read-only** access to [`Mikeolab/vantra`](https://github.com/Mikeolab/vantra) — the actual customer portal codebase this installer work supports. You can clone it and look around for deeper context (e.g. the real `lib/trmm.ts` API integration code) if `docs/agent-install-reference.md` in this repo isn't enough, but you don't have push access there and shouldn't need it. Any changes needed on the web app's side (to support whatever your MSI/installer design ends up requiring) are handled by the product owner and Claude, not by you directly — if you find you need something to change there, raise it as a question rather than opening a PR against it.
+
 ## Questions
 
 For anything about Vantra's product direction, business requirements, or what a "correct" unattended-install experience should feel like from the customer's side — ask the product owner directly. For anything about this repo's structure or your PRs, they'll be reviewed here before merging.

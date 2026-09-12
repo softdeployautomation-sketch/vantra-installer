@@ -28,6 +28,19 @@ async function start() {
     process.exit(1);
   }
 
+  // ZIP installer (STAGE 1) requires pwsh (PowerShell 7) to run
+  // New-AgentShortcut.ps1. Mirrors the MSI_BUILDER_PATH startup check above.
+  const pwshCheck = spawnSync("pwsh", ["-NoProfile", "-NoLogo", "-Command", "\"ok\""], {
+    stdio: "ignore",
+  });
+  if (pwshCheck.status !== 0) {
+    console.error(
+      "Error: pwsh (PowerShell 7) is required for the ZIP installer but was not found on PATH."
+    );
+    console.error("Install it (Ubuntu/Debian): sudo apt-get install powershell");
+    process.exit(1);
+  }
+
   // Check for MinGW cross-compiler (optional — branded EXE feature only)
   const mingwCheck = spawnSync("x86_64-w64-mingw32-gcc", ["--version"], {
     stdio: "ignore",

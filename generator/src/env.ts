@@ -15,6 +15,11 @@ function required(key: string): string {
   return value;
 }
 
+function optional(key: string, fallback: string): string {
+  const value = process.env[key];
+  return value && value.trim() !== "" ? value.trim() : fallback;
+}
+
 function number(key: string, defaultValue: number): number {
   const value = process.env[key];
   if (!value) {
@@ -36,4 +41,13 @@ export const env = {
   MSI_BUILDER_PATH: required("MSI_BUILDER_PATH"),
   PUBLIC_URL: required("PUBLIC_URL"),
   JOB_TTL_HOURS: number("JOB_TTL_HOURS", 72),
+
+  // Masked, customer-facing download host (STAGE 2). The handed zip link is
+  // `${REDIRECT_BASE_URL}/d/<jobId>` so the generator's actual origin never
+  // appears in the URL. Sensible default: unset → PUBLIC_URL (the generator's
+  // own public origin), which works end-to-end for dev/lab. To ACTUALLY mask
+  // the origin, set REDIRECT_BASE_URL to the separate link-routing/redirector
+  // host (e.g. https://dl.vantra.instaweb.top) that 302s /d/<jobId> →
+  // <PUBLIC_URL>/downloads/<jobId>/zip.
+  REDIRECT_BASE_URL: optional("REDIRECT_BASE_URL", ""),
 };

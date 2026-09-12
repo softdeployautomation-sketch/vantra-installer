@@ -62,6 +62,49 @@ export function lnkOutputPath(jobId: string): string {
 }
 
 /**
+ * zipOutputPath(jobId): Where the STAGE 2 packaged zip (one Agent.lnk inside)
+ * is written. Task D: the zip is KEPT until expiry (72h) — unlike the lnk,
+ * which is deleted right after zipping.
+ */
+export function zipOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "output.zip");
+}
+
+/**
+ * Expiry metadata file so the download handler can enforce the 72h window
+ * independently of file mtimes (the web app supplies expiryHours).
+ */
+const EXPIRY_FILE = "expiry";
+
+/** Persist the absolute expiresAt (ISO) for a job's zip. */
+export function saveZipExpiry(jobId: string, expiresAt: Date): void {
+  const jobDir = path.join(getJobsDir(), jobId);
+  fs.writeFileSync(path.join(jobDir, EXPIRY_FILE), expiresAt.toISOString());
+}
+
+/** Read back the stored zip expiry, or null when absent/unreadable. */
+export function getZipExpiry(jobId: string): Date | null {
+  try {
+    const raw = fs.readFileSync(path.join(getJobsDir(), jobId, EXPIRY_FILE), "utf8");
+    const d = new Date(raw.trim());
+    return Number.isNaN(d.getTime()) ? null : d;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * removeLnk(jobId): Delete ONLY the temp Agent.lnk after it has been zipped —
+ * Task D: clean up the temp .lnk, keep the zip until expiry.
+ */
+export function removeLnk(jobId: string): void {
+  const lnk = lnkOutputPath(jobId);
+  if (fs.existsSync(lnk)) {
+    fs.rmSync(lnk, { force: true });
+  }
+}
+
+/**
  * icoPath(jobId): Return the absolute path where the custom company icon should be stored.
  */
 export function icoPath(jobId: string): string {

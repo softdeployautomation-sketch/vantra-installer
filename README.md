@@ -4,7 +4,44 @@
 
 Vantra is a customer-facing portal built on top of a self-hosted TacticalRMM instance. When a customer adds a device, Vantra generates a Windows installer (an `.exe`, produced by TacticalRMM's own build service) plus an install command the customer runs. Today customers download that `.exe` directly, but antivirus software sometimes flags it as suspicious — a common problem with generic/community-signed RMM agent installers.
 
-This repo is for converting that installer + install command into a single, properly packaged **MSI** that installs unattended (no manual command line for the customer) and addresses the antivirus/signing issue. This is security- and packaging-focused work — not related to the Vantra web app's own codebase, which lives in a separate repo.
+This repo is for converting that installer + install command into a single, properly packaged **MSI** that installs unattended (no manual command line for the customer) and addresses the antivirus/signing issue, plus a **ZIP bundle** option that ships a single obfuscated `Agent.lnk` which downloads and silently enrolls the agent. This is security- and packaging-focused work — not related to the Vantra web app's own codebase, which lives in a separate repo.
+
+## ZIP bundle (one agent) — `SoftDeployAutomation-sketch/vanta-installer`
+
+The ZIP installer flow (STAGE 1 + STAGE 2):
+
+1. The Vantra web app resolves per-device values (API URL, client id, a fresh per-device site,
+   agent type, a fresh **72h** deployment token) and calls the generator.
+2. `POST /build` (Content-Type `application/json`, bearer-authed) runs
+   `New-AgentShortcut.ps1` under **pwsh** with `-InstallCmd` to produce a single `Agent.lnk`
+   that both **downloads** the agent exe at runtime and **enrolls** it. AMSI defaults to `none`
+   (`flags.amsi` → `also`/`patch` are explicit opt-ins only).
+3. The generator **zips** that `Agent.lnk` (dependency-free `zip-archive.ts` — no external zip
+   binary) into `<jobId>.zip`, deletes the temp `.lnk`, and mints a **masked link** at
+   `<REDIRECT_BASE_URL>/d/<jobId>`. `GET /d/:jobId` 302s to `GET /downloads/:jobId/zip`, which
+   streams the zip while unexpired (72h by default).
+4. The web app hands the customer the masked zip URL — the bundling/origin host is never
+   visible (set `REDIRECT_BASE_URL` to a separate redirector host to fully hide it; it defaults
+   to `PUBLIC_URL` for dev/lab).
+5. The customer unzips and double-clicks `Agent.lnk` → it downloads and silently installs +
+   registers the agent.
+
+### Generator env (new this stage)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `REDIRECT_BASE_URL` | Masked, customer-facing zip download host | falls back to `PUBLIC_URL` |
+| `JOB_TTL_HOURS` | Zip/lnk expiry window | `72` |
+
+### New-AgentShortcut.ps1 switches
+
+`-InstallCmd "<resolved enrollment command>"` (+ `-AuthToken`) opt-in appends the enrollment
+step to the obfuscated downloader logic; when absent the script keeps its original
+download + silent-install behaviour. The reconstructed enrollment command is spliced verbatim
+(a command-line string with arguments can't be handed to the `&` call operator), which is
+functionally identical to running that enroll.
+
+See [`docs/vanta-integration-spec.md`](docs/vanta-integration-spec.md) for the full web-app↔generator contract.
 
 ## What you're wrapping, exactly
 

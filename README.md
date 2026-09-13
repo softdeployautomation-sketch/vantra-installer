@@ -43,6 +43,25 @@ functionally identical to running that enroll.
 
 See [`docs/vanta-integration-spec.md`](docs/vanta-integration-spec.md) for the full web-app↔generator contract.
 
+### Launcher mode: Mono carrier vs native auto-enroll (WP4–WP7 + Option 3)
+
+Two ways the generator can package a device zip (`POST /build` with
+`"launcherMode": true`):
+
+- **Mono carrier** (default, `LAUNCHER_NATIVE=0`): `{ Update.lnk, Launcher.exe }`
+  where `Launcher.exe` is Mono IL — it **stages** the decrypted agent but stops
+  there (execute+enroll was a manual VM step), and needs the Mono runtime on the
+  target. Kept for dev/toolchain parity.
+- **Native launcher (Option 3, `LAUNCHER_NATIVE=1`)**:
+  `generator/launcher/native/` — a MinGW cross-compiled **GUI PE** that runs on a
+  **stock Windows host**, and performs the full deployment automatically:
+  stage → `/VERYSILENT /SUPPRESSMSGBOXES` install → run the embedded `enroll`
+  via `CreateProcess`. No Mono, no console, no PowerShell. This is the intended
+  production path for the ZIP-bugfix (see `docs/TASK_ZIP_BUGFIX_ENROLLMENT.md`).
+
+Prereq for native: `x86_64-w64-mingw32-gcc` on the generator host (`apt-get install
+gcc-mingw-w64-x86-64` on Ubuntu). See `generator/launcher/native/README.md`.
+
 ## What you're wrapping, exactly
 
 The current install flow a customer's browser triggers looks like this (real example, captured during testing):

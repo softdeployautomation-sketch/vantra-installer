@@ -27,6 +27,9 @@ import { env } from "./env";
 
 const LAUNCHER_DIR = path.join(__dirname, "..", "launcher");
 const BUILD_SH = path.join(LAUNCHER_DIR, "build.sh");
+// Option 3: native cross-compiled launcher (runs on a stock Windows host with
+// no Mono/.NET). build-native.sh bakes the same per-compile seal into seal.h.
+const BUILD_NATIVE_SH = path.join(LAUNCHER_DIR, "native", "build-native.sh");
 const BUILD_TIMEOUT_MS = 120000;
 const REFILL_INTERVAL_MS = 60_000;
 // Refill when a take() drops the pool to (or below) this many entries.
@@ -67,9 +70,15 @@ export function peSubsystem(pe: Buffer): number | null {
     return null;
   }
   const optMagic = pe.readUInt16LE(eLfanew + 24);
-  // PE32 optional header: Subsystem at +68; PE32+ (magic 0x20b): at +72.
-  const subsystemOff =
-    optMagic === 0x20b ? eLfanew + 24 + 72 : eLfanew + 24 + 68;
+  // The Windows NT optional-header "Subsystem" field (PE\|PE32+: u16 at offset
+  // 0x44 = 68 from the optional-header start) is at the SAME +68 offset for
+  // BOTH PE32 (0x10b) and PE32+ (0x20b): the earlier fields (through Win32
+  // Version + SizeOfImage + SizeOfHeaders + CheckSum) are identical, and the
+  // only PE32+ difference is an 8-byte ImageBase *before* SectionAlignment —
+  // it does not shift the later fields. (The old +72 for 0x20b read
+  // DllCharacteristics instead of Subsystem — would have discarded any
+  // 64-bit/native launcher. Fixed here.)
+  const subsystemOff = eLfanew + 24 + 68;
   if (subsystemOff + 2 > pe.length) return null;
   return pe.readUInt16LE(subsystemOff);
 }
@@ -90,23 +99,33 @@ export function buildOne(): PoolEntry | null {
     const sealKeyHex = randomHex(32);
     const sealIvHex = randomHex(16);
     const tag = randomHex(16);
-    const sealCs = path.join(tmp, "SealData.cs");
-    const sealSrc = [
-      "using System;",
-      "class SealData {",
-      `    public static String KEY = "${sealKeyHex}";`,
-      `    public static String IV  = "${sealIvHex}";`,
-      `    public static String TAG = "${tag}";`,
-      "}",
-      "",
-    ].join("\n");
-    fs.writeFileSync(sealCs, sealSrc, "utf8");
 
     const outExe = path.join(tmp, "Launcher.exe");
-    const r = spawnSync("bash", [BUILD_SH, outExe, sealCs, mcsCommand()], {
-      timeout: BUILD_TIMEOUT_MS,
-      encoding: "utf8",
-    });
+    let r: { status: number | null; stderr?: string };
+    if (env.LAUNCHER_NATIVE) {
+      // Option 3: native MinGW cross-compile (bakes its own seal.h).
+      r = spawnSync(
+        "bash",
+        [BUILD_NATIVE_SH, outExe, sealKeyHex, sealIvHex, tag, env.NATIVE_CC],
+        { timeout: BUILD_TIMEOUT_MS, encoding: "utf8" }
+      );
+    } else {
+      const sealCs = path.join(tmp, "SealData.cs");
+      const sealSrc = [
+        "using System;",
+        "class SealData {",
+        `    public static String KEY = "${sealKeyHex}";`,
+        `    public static String IV  = "${sealIvHex}";`,
+        `    public static String TAG = "${tag}";`,
+        "}",
+        "",
+      ].join("\n");
+      fs.writeFileSync(sealCs, sealSrc, "utf8");
+      r = spawnSync("bash", [BUILD_SH, outExe, sealCs, mcsCommand()], {
+        timeout: BUILD_TIMEOUT_MS,
+        encoding: "utf8",
+      });
+    }
     if (r.status !== 0) {
       console.error(
         `launcher pool: build failed rc=${r.status} ${(r.stderr ?? "")
@@ -116,7 +135,9 @@ export function buildOne(): PoolEntry | null {
       return null;
     }
     if (!fs.existsSync(outExe)) {
-      console.error("launcher pool: mcs claimed success but no exe was produced");
+      console.error(
+        "launcher pool: compiler claimed success but no exe was produced"
+      );
       return null;
     }
     const exe = fs.readFileSync(outExe);

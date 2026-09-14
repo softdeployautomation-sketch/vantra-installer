@@ -6,6 +6,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { spawnSync } from "child_process";
 import { env } from "./env";
 import * as storage from "./storage";
 import * as builder from "./builder";
@@ -701,6 +702,94 @@ async function getMaskedZipRedirect(
 }
 
 /**
+ * Simple spawn check — returns true when the command exits 0.
+ */
+function toolPresent(bin: string, args: string[]): boolean {
+  try {
+    const r = spawnSync(bin, args, { stdio: "ignore", timeout: 10_000 });
+    return r.status === 0 && r.error === undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * GET /health (and /healthz) — operator/monitoring status endpoint.
+ *
+ * Untrusted, but intentionally public (no secrets): it reports which host
+ * prerequisites are present, whether an agent payload has been imported, and a
+ * machine-readable `ready` flag so "requisites missing" is never a silent guess
+ * again (Task 3-C). It never leaks the GENERATOR_SECRET, the payload key, or
+ * per-job data.
+ */
+async function getHealth(_request: FastifyRequest, reply: FastifyReply) {
+  const buildScript = path.join(env.MSI_BUILDER_PATH, "build", "build.sh");
+  const mcs = env.MONO_MCS_PATH || "mcs";
+
+  const tools = {
+    node: process.version,
+    pwsh: toolPresent("pwsh", ["-NoProfile", "-NoLogo", "-Command", "\"ok\""]),
+    // mono-mcs is only needed on the default (non-native) launcher path.
+    mcs: env.LAUNCHER_NATIVE ? null : toolPresent(mcs, ["--version"]),
+    // MinGW cross-compiler is only needed on the native launcher path.
+    mingw: env.LAUNCHER_NATIVE ? toolPresent(env.NATIVE_CC, ["--version"]) : null,
+    // wixl (from msitools) is only needed for MSI builds.
+    wixl: toolPresent("wixl", ["--help"]),
+  };
+
+  const msiBuilderOk =
+    fs.existsSync(env.MSI_BUILDER_PATH) && fs.existsSync(buildScript);
+
+  const payload = payloadCache.status();
+
+  const launcherReady =
+    payload.imported &&
+    (env.LAUNCHER_NATIVE ? tools.mingw === true : tools.mcs === true);
+
+  const missing: string[] = [];
+  if (!msiBuilderOk) {
+    missing.push("MSI_BUILDER_PATH (build.sh not found)");
+  }
+  if (!tools.pwsh) {
+    missing.push("pwsh (PowerShell 7) — required for the ZIP installer");
+  }
+  if (env.LAUNCHER_NATIVE) {
+    if (!tools.mingw) {
+      missing.push(`${env.NATIVE_CC} (MinGW cross-compiler) — required for the native launcher`);
+    }
+  } else if (!tools.mcs) {
+    missing.push("mcs (mono-mcs) — set LAUNCHER_NATIVE=1 to use the MinGW/native path instead");
+  }
+  if (!payload.imported) {
+    missing.push("agent payload — import via POST /payload or set PAYLOAD_PATH and restart");
+  }
+  if (!env.REDIRECT_BASE_URL) {
+    missing.push("REDIRECT_BASE_URL (origin masking off — zip links fall back to PUBLIC_URL)");
+  }
+
+  reply.send({
+    ok: launcherReady && tools.pwsh,
+    service: "vantra-msi-generator",
+    launcherMode: env.LAUNCHER_NATIVE ? "native" : "mono",
+    config: {
+      msiBuilderOk,
+      publicUrl: env.PUBLIC_URL,
+      redirectBaseUrl: env.REDIRECT_BASE_URL || null,
+      launcherPoolSize: env.LAUNCHER_POOL_SIZE,
+      payloadMasterKey: env.PAYLOAD_MASTER_KEY ? "env" : "file-or-unset",
+    },
+    tools,
+    payload: payload.imported
+      ? { imported: true, ...payload.meta }
+      : { imported: false },
+    launcherReady,
+    msiReady: msiBuilderOk && tools.wixl,
+    ready: launcherReady && tools.pwsh,
+    missing,
+  });
+}
+
+/**
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
@@ -729,4 +818,6 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get("/downloads/:jobId/installer.exe", getExeDownload);
   app.get("/downloads/:jobId/zip", getZipDownload);
   app.get("/d/:jobId", getMaskedZipRedirect);
+  app.get("/health", getHealth);
+  app.get("/healthz", getHealth);
 }

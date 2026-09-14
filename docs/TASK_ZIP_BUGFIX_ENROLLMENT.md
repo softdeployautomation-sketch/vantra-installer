@@ -1,8 +1,11 @@
 # TASK : ZIP bug fix — device not enrolling after running the bundle
 
 **Status:** 3-A IMPLEMENTED (Option 3 — native launcher with auto-execute +
-auto-enroll), host- and cross-build-validated. 3-B/3-C/3-D/3-E still OPEN
-below. This document remains the running handoff.
+auto-enroll), host- and cross-build-validated. **3-B RESOLVED** (native launcher —
+no Mono runtime on target). **3-C IMPLEMENTED + server-verified** (health endpoint,
+`docs/PREREQUISITES.md`, admin Status surface) — payload imported, generator is
+`ready:true`. **3-D DONE** (UI copy fixed). **3-E still OPEN** (Windows VM).
+This document remains the running handoff.
 
 **Symptom (bug report):** After generating the ZIP and running the file on the test machine,
 **the device was NOT added** (never shows in Vantra). Michael suspects server requisites may be missing.
@@ -145,7 +148,28 @@ Implementation notes:
 
 ## STAGE 3-C — Server prerequisites (verify on VPS/prod now; add a health check)
 
-Create `docs/PREREQUISITES.md` and verify on the actual server:
+**IMPLEMENTED + server-verified (2026-09-14):**
+- **Generator `GET /health` (+ `/healthz`)** added — `generator/src/routes.ts`: reports
+  tool presence (pwsh / mono-mcs / MinGW / wixl), config presence, payload status +
+  `sha256`, and machine-readable `ready`, `launcherReady`, `msiReady` + `missing[]`.
+- **`generator/.env.example`** now committed (previously only lived on the box, gitignored).
+- **`docs/PREREQUISITES.md`** created with the verified production host state.
+- **Web app:** `app/api/health/route.ts` + admin **Status** page now surface the
+  generator config / reachability / payload / missing items (via `lib/system-status.ts`
+  proxying the generator's `/health`).
+
+**Verified on the live box (`164.68.105.96`):** node ✅ / pwsh ✅ / `wixl` ✅ / MinGW ✅,
+but **mono/mcs MISSING** (so the box MUST run `LAUNCHER_NATIVE=1` — previously unset,
+defaulting to the missing-mcs path). Web-app `.env` has `MSI_GENERATOR_URL` +
+`MSI_GENERATOR_SECRET` ✅ → ZIP no longer silently 503s on config.
+
+**Remaining on the box:** none blocking — `LAUNCHER_NATIVE=1` applied (backup
+`.env.bak-<ts>`) and the agent payload imported (`sha256
+9e8e82a4e49ffc9112a9c2e00b154a7f03a662dd527c34fadc58f7d584d29735` from
+`msi-builder/payload/tacticalagent.exe`) → `GET /health` reports
+`ready:true`. Only `REDIRECT_BASE_URL` is still unset (origin masking off; optional).
+
+Body of the requirement (kept as reference):
 - Generator host: Node 20+, `pwsh` 7.6+, mono/mcs, msitools; `GENERATOR_SECRET`, `MSI_BUILDER_PATH`,
   `PUBLIC_URL`, `REDIRECT_BASE_URL`, `LAUNCHER_POOL_SIZE`.
 - **Payload imported** (`POST /payload` or `PAYLOAD_PATH`) + record the imported agent `sha256`.
@@ -155,11 +179,15 @@ Create `docs/PREREQUISITES.md` and verify on the actual server:
 
 ## STAGE 3-D — Web app + UI alignment
 
-- Fix the misleading `hint="…downloads & silently enrolls"` (`add-device-modal.tsx` line 506).
-- Confirm the zip contract sent by `callZipGenerator` (`lib/zip-generator.ts`) vs what the generator
-  expects (`launcherMode`, `exeUrl`, `flags`), and that `launcherMode` should be true only once
-  enrollment actually works (3-A).
-- Add an end-to-end assertion: a device added via ZIP must show **Online** in Vantra.
+**DONE (2026-09-14):**
+- Fixed the misleading `hint="…downloads & silently enrolls"` → `"Self-contained ZIP
+  — installs & enrolls the agent offline"` (`components/add-device-modal.tsx` line 506).
+- Confirmed the zip contract: `lib/zip-generator.ts` sends `{ exeUrl, apiUrl,
+  clientId, siteId, agentType, authToken, features, expiryHours, launcherMode, flags }`
+  and the generator's `/build` (JSON) branch consumes exactly that; `launcherMode: true`
+  is currently hardcoded in `app/api/devices/deployments/route.ts` (`line 296`), which is
+  correct now that 3-A made auto-enroll actually work.
+- End-to-end assertion (a device added via ZIP shows **Online**) is the 3-E gate below.
 
 ## STAGE 3-E — End-to-end validation (the real gate)
 

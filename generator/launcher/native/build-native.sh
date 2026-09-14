@@ -62,7 +62,7 @@ fi
 
 "$CC_BIN" -mwindows -O2 -s -o "$OUT" \
     "$TMP/launcher.c" "$TMP/overlay.c" "$TMP/config.c" "$TMP/spawn.c" "$TMP/aes256.c" \
-    "$TMP/launcher_res.o"
+    "$TMP/launcher_res.o" -ladvapi32
 if [ ! -s "$OUT" ]; then
     echo "ERROR: ${CC_BIN} reported success but $OUT is missing/empty" >&2
     exit 1

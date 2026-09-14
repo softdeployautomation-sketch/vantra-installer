@@ -1735,6 +1735,43 @@ function New-LinkInfo {
     return $result
 }
 # ============================================================================
+# Relative LinkInfo writer (self-contained relative-target shortcut)
+# ============================================================================
+# A 0x1C-byte LinkInfo header with VolumeIDAndLocalBasePath CLEAR and all path
+# offsets zero, plus an empty ANSI Z CommonPathSuffix (1 byte). This is the
+# standard "relative link" stub: Windows combines it with the RELATIVE_PATH
+# StringData to resolve the target against the .lnk's own folder, which is
+# exactly what a zip-carried {Update.lnk, Launcher.exe} pair needs. Without it
+# HasLinkInfo is absent and a bare relative .lnk double-click silently does
+# nothing on modern Explorer.
+function New-RelativeLinkInfo {
+    param()
+    [System.UInt32]$headerSize = [System.UInt32]$script:LINKINFO_HEADER_LEGACY
+    # Empty ANSI Z CommonPathSuffix sits immediately after the header.
+    [System.UInt32]$suffixOffset = $headerSize
+    [System.UInt32]$linkInfoSize = $suffixOffset + 1
+
+    $buffer = New-ByteList
+
+    Write-U32 -Buffer $buffer -Value $linkInfoSize
+    Write-U32 -Buffer $buffer -Value $headerSize
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # flags: relative (no volume/local)
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # VolumeIDOffset
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # LocalBasePathOffset
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # CommonNetworkRelativeLinkOffset
+    Write-U32 -Buffer $buffer -Value $suffixOffset      # CommonPathSuffixOffset
+    $buffer.Add([byte]0)                                # empty ANSI Z CommonPathSuffix
+
+    [byte[]]$result = [byte[]]$buffer.ToArray()
+
+    if ($result.Length -ne $linkInfoSize) {
+        Throw-ShellLinkError `
+            "Internal relative LinkInfo size calculation mismatch."
+    }
+
+    return $result
+}
+# ============================================================================
 # LinkTargetIDList writer (file-system PIDL for drive-rooted file targets)
 # ============================================================================
 
@@ -2681,7 +2718,14 @@ function Write-ShellLink {
         [Parameter(Mandatory = $true)]
         [hashtable]$Spec,
 
-        [uint32]$ShowCommand = 1
+        [uint32]$ShowCommand = 1,
+
+        # For a RELATIVE-target shortcut, also embed a minimal (empty) relative
+        # LinkInfo block and set the HasLinkInfo flag. Explorer otherwise cannot
+        # resolve a bare relative target (flags end up 0x000000CC alone) and a
+        # double-click silently does nothing. Only launcher-mode relative .lnk
+        # files opt in; absolute-target shortcuts are unaffected.
+        [switch]$RelativeLinkInfo
     )
 
     if (-not $Spec.ContainsKey('TargetPath')) {
@@ -2769,6 +2813,16 @@ function Write-ShellLink {
     if ($parts.IsRelative) {
 
         $flags = $flags -bor $script:FLAG_HAS_RELATIVE_PATH
+
+        # A relative-target launcher .lnk additionally carries a minimal
+        # relative LinkInfo block + HasLinkInfo so Explorer resolves the target
+        # against the shortcut's own folder. Without HasLinkInfo Windows cannot
+        # resolve a bare relative path (flags alone end up 0x000000CC) and a
+        # double-click silently does nothing (no UAC, no staging).
+        if ($RelativeLinkInfo) {
+
+            $flags = $flags -bor $script:FLAG_HAS_LINKINFO
+        }
     }
     else {
 
@@ -2879,6 +2933,13 @@ function Write-ShellLink {
             -TargetPath $parts.FullPath
 
         $chunks.Add($linkInfo)
+    }
+    elseif ($RelativeLinkInfo) {
+
+        # Minimal relative LinkInfo (VolumeIDAndLocalBasePath clear, all path
+        # offsets zero, empty CommonPathSuffix). Explorer combines this stub
+        # with the RELATIVE_PATH StringData to resolve the sibling target.
+        $chunks.Add((New-RelativeLinkInfo))
     }
 
     # ------------------------------------------------------------------------
@@ -5744,6 +5805,17 @@ function Test-LauncherArtifact {
             $rows.Add("FAIL| relative target missing/unexpected: '$rel'")
             $failed++
         }
+# ---- R3b: HasLinkInfo present so Explorer can resolve the relative .lnk ----
+        $hasLinkInfoRaw = $false
+        if ($parsed.LinkFlags -and $parsed.LinkFlags.HasLinkInfo) {
+            $hasLinkInfoRaw = $true
+        }
+        if ($hasLinkInfoRaw) {
+            $rows.Add('PASS| HasLinkInfo set (relative LinkInfo block present)')
+        } else {
+            $rows.Add('FAIL| HasLinkInfo missing - Explorer cannot resolve a bare relative .lnk')
+            $failed++
+        }
 
         # ---- R4: ShowCommand 7 (minimized / background) ----
         if ([uint32]$parsed.Header.ShowCommand -eq 7) {
@@ -5914,7 +5986,8 @@ if ($LauncherMode) {
 
     Write-ShellLink `
         -Path $Output `
-        -Spec $launcherSpec | Out-Null
+        -Spec $launcherSpec `
+        -RelativeLinkInfo | Out-Null
 
     $expectedLauncherSpec = @{
         TargetPath   = $launcherTarget

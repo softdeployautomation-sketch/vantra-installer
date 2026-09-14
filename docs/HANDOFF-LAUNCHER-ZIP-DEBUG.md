@@ -144,6 +144,13 @@ ssh -i ~/.ssh/tacticalrmm_vps myrat@192.168.0.103
   resolve a `.lnk`: `Start-Process lnk`/`WScript.Shell.Run`/`explorer.exe` all fail);
   run the GUI `Launcher.exe` / `_stg_*.exe` via an **elevated scheduled task**
   (`schtasks /Create … /RU SYSTEM /RL HIGHEST`) to test the install path.
+- **VM was fully cleaned (2026-09-14)** before handover: `tacticalrmm` + `Mesh Agent`
+  services deleted, `C:\Program Files\TacticalAgent`, `C:\dbg`, the desktop
+  `VantraInstall` folder, `_stg_*.exe` staging, and all `vntr*` scheduled tasks
+  removed. The unrelated pre-existing `PolicyAgent` / `RMM Agent` product was left
+  intact. The offline device the VM produced (`agents_agent id=4`) and the test
+  deployments (`a7b1a5aa…`, site 36) are RMM-side; owner plans to remove them from
+  Vantra — the next agent should create a brand-new device when re-testing.
 - **Repos (local)**: generator `/Users/mikeolab/vantra-installer` (`installer-dev`,
   HEAD `d49b85c`); web app `/Users/mikeolab/vantra`. Payload not in git; on the VPS +
   `~/.ssh/../vantra-installer/.tacticalrmm_agent.exe` if a local copy is needed.

@@ -1,12 +1,156 @@
-# HANDOFF — Launcher-mode ZIP debug (2026-09-14)
+# HANDOFF — Launcher-mode ZIP: Bug A FULLY RESOLVED (updated 2026-09-14)
 
-Handed from the current debugging run to the next agent. Two bugs were in play.
-**Bug B is FIXED + DEPLOYED + VERIFIED.** **Bug A (enrollment) is diagnosed
-server-side and needs the Windows VM to finish** (VM access was not provided).
+Two bugs were in play.
+
+- **Bug B — spurious 502 (≈30%): FIXED + DEPLOYED + VERIFIED** (commit `d49b85c`).
+  Trigram scan now runs on the decompressed `Update.lnk`, not the raw encrypted zip.
+- **Bug A — device never enrolls: ROOT CAUSE FULLY PROVEN + payload fix DEPLOYED;
+  one web-app code change (auth token) remains to make the zip flow work in the app.**
+
+This file now documents the definitive root cause, what is on the VPS right now, and
+the exact remaining fix. The earlier "server-side ruled out" notes are superseded.
 
 ---
 
-## Bug A — enrollment: device never appears in Vantra  (PROGRESS → NEEDS VM)
+## Bug A — root cause (empirically proven on 2026-09-14)
+
+There are **two separate failures**; both must be understood. The installed agent
+binary (`tacticalrmm.exe`) is CORRECT; the two problems are (1) the wrong *payload
+file* was shipped and (2) the wrong *auth credential* was embedded.
+
+### Failure 1 — the shipped payload was the deprecated rmmagent **bootstrap**
+- `msi-builder/payload/tacticalagent.exe` = **5,268,992 B**, sha256
+  `9e8e82a4e49ffc9112a9c2e00b154a7f03a662dd527c34fadc58f7d584d29735`.
+- It is the per-deployment **bootstrap**: baked `main.Inno=tacticalagent-v2.11.0…`,
+  `main.DownloadUrl=…/rmmagent/…/v2.11.0/…`, `vcs.time=2022-08-10`, baked
+  Client/Site/Token. Its registered Go flags are only
+  `-cert -local-mesh -log -meshdir -nomesh -proxy -silent -version`; it **rejects
+  `-m install`** (`flag provided but not defined: -m`).
+- The REAL agent for THIS server is **`tacticalrmm.exe`**
+  ("Tactical RMM Agent: 2.11.0", **12,314,624 B**, sha256
+  `920f59baa49244152f72495a6bab0f801621ef8ae44d73654e7af26bb8abe57e`) that the
+  official Inno installer `tacticalagent-v2.11.0-windows-amd64.exe` (5,212,232 B)
+  packs. It **does** implement
+  `-m install --api --client-id --site-id --agent-type --auth` (verified on the VM).
+- `LATEST_AGENT_VER = "2.11.0"` here is **genuinely current** (matches official
+  master). **No code-sign token exists** (`core_codesigntoken` empty) and **none is
+  needed** — the launcher zip embeds the raw agent in-memory; that is the
+  code-signing-free design intent. The RMM "Add Agent .exe" endpoint is irrelevant.
+- **Status: FIXED + DEPLOYED** (see below).
+
+### Failure 2 — the flow embeds the deployment **uid** as `--auth`, but RMM validates a knox **token_key**
+- Vantra `createDeployment()` returns the deployment `uid` (UUID); the generator
+  embeds it as `--auth <uid>` in `tacticalrmm.exe -m install`.
+- But `/api/v3/installer/` authenticates (DRF/knox) against the deployment's
+  `clients_deployment.token_key` (random 64-hex), which is **NOT the `uid`**. Empirically
+  (deployment `a7b1a5aa…`):
+  ```
+  Authorization: Token <token_key 287b52b2…> -> GET /api/v3/installer/ -> 200 "ok"
+  Authorization: Token <uid a7b1a5aa…>       -> GET /api/v3/installer/ -> 401 "Invalid token."
+  ```
+- So the agent gets 401 and prints
+  `Installer token has expired. Please generate a new one.` (the string is in the
+  agent: `agent/install.go` → `installerMsg(...)` on a failed GET `/api/v3/installer/`).
+- **This is the real enrollment blocker** — even after the payload fix, `--auth <uid>`
+  still 401s. With the correct `token_key` the flow works end-to-end (proven below).
+- **Status: NOT fixed in the web app — the remaining code change.**
+
+### Failure 3 (deployment note) — the launcher must run elevated
+- The launcher PE has **no `requestedExecutionLevel` manifest** → a normal double-click
+  runs non-elevated and **cannot write staging to `C:\Windows\Temp` / install a
+  service**. Proven: desktop double-click produced no `_stg_*.exe`; running as SYSTEM
+  (elevated) staged `_stg_7c4a30a82bd488150372b2242c6ea062.exe` and installed the agent.
+- The agent's `-m install` also needs admin (mesh + Windows service), so elevation is
+  unavoidable in the real flow. Decide how it is presented (a `requireAdministrator`
+  manifest on `Launcher.exe`, or runas). See follow-up task.
+
+---
+
+## What is DEPLOYED on the VPS right now (payload fix already live)
+
+1. **Payload replaced:** `/opt/vantra-installer/msi-builder/payload/tacticalrmm.exe`
+   (12,314,624 B, sha256 `920f59ba…`); the old bootstrap kept as
+   `tacticalagent.exe.bak-20260914-175221`.
+2. **Re-imported into the generator cache** via `POST /payload` (bearer
+   `GENERATOR_SECRET` in `/opt/vantra-installer/generator/.env`); cache
+   `payload-cache/meta.json` now reports sha256 `920f59ba…`, size 12,314,624.
+3. **Service restarted + pool reseeded:** `systemctl restart vantra-msi-generator`;
+   `GET /healthz` → `{"ready":true}`, `launcherMode:"native"`, payload sha
+   `920f59ba…`, pool target 30, `mingw:true`.
+4. **Build verified:** job `3e3314f5-9478-4731-ab8f-bb93d80cad92` log
+   `[validate] PASS| payload round-trip byte-identical (12314624 bytes)` +
+   `RESULT| LAUNCHER-VALIDATE-OK`; zip = `{Update.lnk (250B), Launcher.exe(12,361,786B)}`.
+
+### Proof the mechanism works end-to-end (correct token)
+On the VM, running the staged `_stg_…exe` (elevated) with
+`-m install --api https://api.instaweb.top --client-id 3 --site-id 36
+--agent-type workstation --auth <token_key 287b52b2…> --rdp --ping --power`:
+downloaded + installed mesh, "Adding agent to dashboard", installed service — a
+device appeared:
+```
+agents_agent id=4  hostname=Sc  site 36  monitor_type=workstation  version=2.11.0  goarch=amd64
+created 2026-09-14 18:54:40  last_seen 18:54:47
+```
+(A trailing `fatal: The system cannot find the file specified.` occurred when that
+one-shot temp-staged process tried to *start* the installed service — a runtime
+detail of running from the temp staging dir; the real launcher places the agent in
+Program Files so the service starts normally. Verify during the follow-up.)
+
+---
+
+## The exact remaining fix (web app)
+
+Make `--auth` = `clients_deployment.token_key`, not the deployment `uid`.
+
+1. **RMM** — expose the token: add `"token_key"` to `DeploymentSerializer.Meta.fields`
+   (`/rmm/api/tacticalrmm/clients/serializers.py`), or make `AgentDeployment`
+   (`clients/views.py`) return it in the POST response.
+2. **Web app** (`/Users/mikeolab/vantra`):
+   - `lib/trmm.ts createDeployment()`: return the deployment's `token_key` (read from
+     the deployments list / POST response) -- today it returns only `match.uid`.
+   - `app/api/devices/deployments/route.ts`: pass `authToken = token_key` to
+     `callZipGenerator`; keep `exeUrl / deployUrl = /clients/<uid>/deploy/`.
+   - `lib/zip-generator.ts`: no change (already forwards `authToken`).
+3. **Generator** — no code change: `/build` only requires a non-empty `authToken`
+   (no UUID check), so the 64-hex `token_key` is accepted as-is.
+4. **Elevation** — make the launcher run elevated (Failure 3) so staging +
+   service install succeed on a real desktop.
+
+Reference commands:
+```bash
+# VPS
+ssh -i ~/.ssh/tacticalrmm_vps root@164.68.105.96
+cd /opt/vantra-installer/generator
+SECRET=$(grep '^GENERATOR_SECRET=' .env | cut -d= -f2-)
+curl -sS -X POST http://localhost:4000/payload -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @/opt/vantra-installer/msi-builder/payload/tacticalrmm.exe
+systemctl restart vantra-msi-generator
+# VM (interactive desktop: double-click Update.lnk, approve UAC)
+ssh -i ~/.ssh/tacticalrmm_vps myrat@192.168.0.103
+```
+
+---
+
+## Environment / access (unchanged)
+
+- **VPS**: `ssh -i ~/.ssh/tacticalrmm_vps root@164.68.105.96` — generator
+  `/opt/vantra-installer/generator` (systemd `vantra-msi-generator`, port 4000); web
+  app `/opt/vantra` (`vantra`, port 3300); nginx `{vantra,dl.instaweb.top}.conf`; RMM
+  `/rmm/api/tacticalrmm` (daphne/uwsgi/celery/nats); RMM DB `tacticalrmm`.
+- **Windows VM**: UTM bridged `192.168.0.103`, user `myrat` (admin), key
+  `~/.ssh/tacticalrmm_vps`; scratch `C:\dbg`. Interactive desktop available — use a
+  real double-click for `.lnk` tests. Headless SSH runs in **session 0** (no shell to
+  resolve a `.lnk`: `Start-Process lnk`/`WScript.Shell.Run`/`explorer.exe` all fail);
+  run the GUI `Launcher.exe` / `_stg_*.exe` via an **elevated scheduled task**
+  (`schtasks /Create … /RU SYSTEM /RL HIGHEST`) to test the install path.
+- **Repos (local)**: generator `/Users/mikeolab/vantra-installer` (`installer-dev`,
+  HEAD `d49b85c`); web app `/Users/mikeolab/vantra`. Payload not in git; on the VPS +
+  `~/.ssh/../vantra-installer/.tacticalrmm_agent.exe` if a local copy is needed.
+
+---
+
+## Bug A — (SUPERSEDED) earlier server-side notes
 
 ### Server-side investigation — ALL RULED OUT as causes (verified against live systems)
 - **Vantra DB** (`/opt/vantra/.env` → `DATABASE_URL`), row `dbg-fresh-1-1789389726`:

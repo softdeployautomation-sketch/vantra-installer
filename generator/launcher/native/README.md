@@ -30,7 +30,8 @@ the decryption in C, so pooled server stamps keep working.
 | `config.c`     | percent-decoded config parser; quote-aware tokenizer for the `enroll` line |
 | `spawn.c`      | `CreateProcess` (Windows, no window) / fork-exec (POSIX) |
 | `seal.h`       | compile-time seal — `KEY`/`IV`/`TAG` baked per build (mirror of `SealData.cs`) |
-| `build-native.sh` | MinGW cross-compile to a GUI-subsystem PE + asserts Subsystem=2 + SHA-256 |
+| `launcher.rc` + `launcher.manifest` | RT_MANIFEST with `requestedExecutionLevel=requireAdministrator` — compiled via `windres` and linked in so a double-click raises UAC once (staging + service install run elevated). AMSI stays `none`. |
+| `build-native.sh` | MinGW cross-compile to a GUI-subsystem PE + asserts Subsystem=2, embedded `requireAdministrator` manifest, prints SHA-256; exits non-zero on failure |
 
 ## Build (cross-compile a Windows PE)
 

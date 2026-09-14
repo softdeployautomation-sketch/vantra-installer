@@ -7,6 +7,12 @@ Two bugs were in play.
 - **Bug A — device never enrolls: ROOT CAUSE FULLY PROVEN + payload fix DEPLOYED;
   one web-app code change (auth token) remains to make the zip flow work in the app.**
 
+  ##### ✅ UPDATE 2026-09-14 — fully fixed + deployed. `token_key` (not `uid`) is now the
+  ##### `--auth` (RMM serializer exposes it, Vantra `createDeployment`/route embed it, verified
+  ##### live), and `Launcher.exe` now carries a `requireAdministrator` UAC manifest. See
+  ##### `TASK_DEPLOY_CORRECT_FLOW_LIVE.md` for the deployed state + the one remaining interactive
+  ##### VM acceptance (fresh Add-Device → double-click → approve UAC → device Online).
+
 This file now documents the definitive root cause, what is on the VPS right now, and
 the exact remaining fix. The earlier "server-side ruled out" notes are superseded.
 

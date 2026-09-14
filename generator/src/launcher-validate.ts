@@ -12,6 +12,7 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import * as zlib from "zlib";
 import { spawn } from "child_process";
 import * as launcherPool from "./launcher-pool";
 import { decryptOverlay } from "./launcher-overlay";
@@ -40,7 +41,9 @@ function sha256Hex(data: Buffer): string {
 }
 
 /** Minimal ZIP central-directory reader (for zips written by zip-archive.ts). */
-function readZipEntries(zip: Buffer): { count: number; names: string[] } {
+function readZipEntries(
+  zip: Buffer
+): { count: number; names: string[]; localOffsets: Record<string, number> } {
   // EOCD: find "PK\x05\x06" scanning the last 64KB + 22.
   const tailStart = Math.max(0, zip.length - 65_557);
   let eocd = -1;
@@ -55,10 +58,11 @@ function readZipEntries(zip: Buffer): { count: number; names: string[] } {
       break;
     }
   }
-  if (eocd < 0) return { count: 0, names: [] };
+  if (eocd < 0) return { count: 0, names: [], localOffsets: {} };
   const count = zip.readUInt16LE(eocd + 10);
   const cdOffset = zip.readUInt32LE(eocd + 16);
   const names: string[] = [];
+  const localOffsets: Record<string, number> = {};
   let p = cdOffset;
   for (let i = 0; i < count; i++) {
     if (
@@ -73,10 +77,48 @@ function readZipEntries(zip: Buffer): { count: number; names: string[] } {
     const nameLen = zip.readUInt16LE(p + 28);
     const extraLen = zip.readUInt16LE(p + 30);
     const commentLen = zip.readUInt16LE(p + 32);
-    names.push(zip.subarray(p + 46, p + 46 + nameLen).toString("utf8"));
+    const name = zip.subarray(p + 46, p + 46 + nameLen).toString("utf8");
+    names.push(name);
+    localOffsets[name] = zip.readUInt32LE(p + 42); // local-file-header offset
     p += 46 + nameLen + extraLen + commentLen;
   }
-  return { count, names };
+  return { count, names, localOffsets };
+}
+
+/**
+ * Return the DECOMPRESSED bytes of the zip entry starting at the given local
+ * file header offset (DEFLATE method 8, as written by zip-archive.ts), or null
+ * if it is not an inflatable store-no-DD store within the archive.
+ *
+ * WHY: the launcher-mode artifact's `Launcher.exe` is mostly high-entropy
+ * AES-256-CTR ciphertext (the sealed overlay). Scanning the RAW compressed zip
+ * bytes for short trigrams like "IEX"/"-Enc" randomly matches inside that
+ * ciphertext (~30% of builds) and false-fails validation → a spurious 502 and
+ * a dead link. Inflating first makes the scan deterministic and
+ * ciphertext-immune. The targeted, human-authored Update.lnk is the stable
+ * blob worth scanning; AMSI stays "none" (real detections are never weakened).
+ */
+function readZipEntryInflated(zip: Buffer, localOff: number): Buffer | null {
+  if (localOff < 0 || localOff + 30 > zip.length) return null;
+  if (
+    zip[localOff] !== 0x50 ||
+    zip[localOff + 1] !== 0x4b ||
+    zip[localOff + 2] !== 0x03 ||
+    zip[localOff + 3] !== 0x04
+  ) {
+    return null;
+  }
+  const compLen = zip.readUInt32LE(localOff + 18);
+  const nameLen = zip.readUInt16LE(localOff + 26);
+  const extraLen = zip.readUInt16LE(localOff + 28);
+  const dataStart = localOff + 30 + nameLen + extraLen;
+  if (dataStart + compLen > zip.length) return null;
+  const comp = zip.subarray(dataStart, dataStart + compLen);
+  try {
+    return zlib.inflateRawSync(comp);
+  } catch {
+    return null;
+  }
 }
 
 function runPwshValidate(
@@ -190,8 +232,12 @@ export async function validateLauncherBuild(
     fail("Zone.Identifier entry found", zoneHit.join(", "));
   }
 
-  // ---- 3. zip-level trigram scan ----
-  const hay = zip.toString("latin1");
+  // ---- 3. trigram scan over the DECOMPRESSED Update.lnk (NOT the raw zip).
+  //      The artifact's Launcher.exe is mostly high-entropy AES-256 ciphertext;
+  //      the RAW compressed bytes randomly match "-Enc"/"IEX" etc. (~30% of
+  //      builds → spurious 502 + dead link). Inflate the human-authored .lnk
+  //      and scan THAT, so the check is deterministic and ciphertext-immune.
+  //      AMSI default stays "none" (real detections are never weakened).
   const needles = [
     "-Enc",
     "EncodedCommand",
@@ -199,14 +245,28 @@ export async function validateLauncherBuild(
     "Invoke-Expression",
     "FromBase64String",
   ];
-  const hits = needles.filter((n) => hay.includes(n));
-  if (hits.length === 0) {
-    pass("zip trigram scan clean", "no -Enc/IEX/FromBase64String");
+  const lnkLocal = entries.localOffsets["Update.lnk"];
+  const lnkInflated =
+    typeof lnkLocal === "number" ? readZipEntryInflated(zip, lnkLocal) : null;
+  if (lnkInflated === null || lnkInflated.length === 0) {
+    fail("trigram scan", "could not inflate Update.lnk for scanning");
   } else {
-    fail("zip trigram scan", hits.join(", "));
+    const scanHay = lnkInflated.toString("latin1");
+    const hits = needles.filter((n) => scanHay.includes(n));
+    if (hits.length === 0) {
+      pass(
+        "trigram scan clean",
+        "decompressed Update.lnk: no -Enc/IEX/FromBase64String"
+      );
+    } else {
+      fail("trigram scan", hits.join(", "));
+    }
   }
 
   // ---- 4. auth token not plaintext in the zip ----
+  // (Raw bytes: the token lives ONLY inside the encrypted overlay, so ANY
+  //  plaintext occurrence in the compressed stream is a real leak to catch.)
+  const hay = zip.toString("latin1");
   if (!hay.includes(p.authToken)) {
     pass("auth token not plaintext in zip");
   } else {

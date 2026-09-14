@@ -3,9 +3,10 @@
  *
  * Replaces the Mono-IL launcher with a bare native Windows PE that runs on a
  * stock host (no Mono/.NET) and performs the full deployment automatically:
- * decrypt the LOCKED VNTR overlay in memory → stage the agent →
- * silently install it → run the `enroll` value → the device registers with
- * ZERO manual steps. Compiled with -mwindows (PE Subsystem 2): no console.
+ * decrypt the LOCKED VNTR overlay in memory → stage the agent → wait ~6s for it
+ * to settle → run the STAGED payload with the `enroll` argv (install + enroll
+ * in one run) → the device registers with ZERO manual steps. Compiled with
+ * -mwindows (PE Subsystem 2): no console.
  */
 
 #ifndef LNCH_COMMON_H
@@ -39,5 +40,7 @@ void free_tokens(char **toks, size_t n);
 /* spawn.c */
 int  run_proc(const char *exe, const char **arg, int argc);
 int  run_enroll(const char *enroll);
+int  run_enroll_staged(const char *enroll, const char *stagedExe);
+int  sleep_ms(unsigned ms);
 
 #endif

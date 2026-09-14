@@ -22,6 +22,7 @@ import * as launcherPool from "./launcher-pool";
 import { createZip } from "./zip-archive";
 import { validateLauncherBuild } from "./launcher-validate";
 import { HDR_LEN, ENV_LEN, assembleOverlay } from "./launcher-overlay";
+import { env } from "./env";
 
 export { HDR_LEN, ENV_LEN };
 
@@ -165,14 +166,18 @@ export async function runLauncherBuild(opts: {
   const lnkPath = storage.lnkRelativeOutputPath(jobId);
   fs.writeFileSync(launcherPath, stampedExe);
 
-  // 5. Update.lnk — relative Launcher.exe, zero arguments, ShowCommand 7.
+  // 5. Update.lnk — Launcher.exe target, zero arguments, ShowCommand 7.
+  //    Uses env.LAUNCHER_LNK_TARGET (absolute path) when set -> a normal
+  //    absolute LinkInfo so Explorer reliably double-clicks -> UAC. Falls back
+  //    to a bare relative "Launcher.exe" otherwise.
+  const lnkTarget = env.LAUNCHER_LNK_TARGET || "Launcher.exe";
   const lnkResult = await runPwsh([
     path.join(__dirname, "New-AgentShortcut.ps1"),
     "-LauncherMode",
     "-Output",
     lnkPath,
     "-LauncherTarget",
-    "Launcher.exe",
+    lnkTarget,
     "-LauncherTag",
     entry.tag,
   ]);

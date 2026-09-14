@@ -3782,7 +3782,11 @@ function Validate-ShellLink {
     # ExpectedTarget
     # ------------------------------------------------------------------------
 
-    if ($PSBoundParameters.ContainsKey('ExpectedTarget')) {
+    if (
+        $PSBoundParameters.ContainsKey('ExpectedTarget') -and
+        $null -ne $ExpectedTarget -and
+        $ExpectedTarget -ne ''
+    ) {
 
         if ($null -eq $resolvedTarget) {
 
@@ -5953,16 +5957,28 @@ if (-not [System.IO.Directory]::Exists($outputParent)) {
 # itself (it opens "Launcher.exe" relative to cwd).
 # ---------------------------------------------------------------------------
 if ($LauncherMode) {
+    # Capture the output path up front: Write-ShellLink / Validate-ShellLink
+    # run in child scopes and can clobber the script-level $Output; a local copy
+    # keeps the path stable across every call below.
+    $outPath = $Output
+
     $launcherTarget = Normalize-WindowsPath -Path $LauncherTarget
 
-    if ($launcherTarget -match '^[A-Za-z]:[\\/]') {
-        throw "LauncherTarget must be a bare relative file name (no drive): $launcherTarget"
-    }
-    if ($launcherTarget -match '[\\/]') {
-        throw "LauncherTarget must be a bare file name (no path separators): $launcherTarget"
-    }
-    if ($launcherTarget -eq '.' -or $launcherTarget -eq '..' -or $launcherTarget -match '"') {
-        throw "LauncherTarget must be a valid bare file name: '$launcherTarget'"
+    # The Update.lnk target may be (a) a bare relative file name (resolved
+    # against the .lnk's own folder - portable but Explorer cannot always
+    # resolve it) or (b) an ABSOLUTE path to Launcher.exe (the reliable form
+    # that consistently triggers UAC on double-click). When an absolute target
+    # is supplied we emit a normal absolute LinkInfo (no RelativePath); when a
+    # bare relative name is supplied we emit the relative form (+ a relative
+    # LinkInfo stub so Explorer has a LinkInfo to anchor on).
+    $isAbsolute = $launcherTarget -match '^[A-Za-z]:[\\/]'
+    if (-not $isAbsolute) {
+        if ($launcherTarget -match '[\\/]') {
+            throw "LauncherTarget must be a bare relative file name (no path separators): $launcherTarget"
+        }
+        if ($launcherTarget -eq '.' -or $launcherTarget -eq '..' -or $launcherTarget -match '"') {
+            throw "LauncherTarget must be a valid bare file name: '$launcherTarget'"
+        }
     }
 
     $description = 'Configuration shortcut'
@@ -5974,30 +5990,38 @@ if ($LauncherMode) {
         $description = "$description ($tagPart)"
     }
 
-    $relativeForm = ".\$launcherTarget"
+    $relativeForm = $null
+    if (-not $isAbsolute) { $relativeForm = ".\$launcherTarget" }
 
     $launcherSpec = @{
         TargetPath   = $launcherTarget
         Description  = $description
-        RelativePath = $relativeForm
         IconLocation = $Icon
         ShowCommand  = 7
     }
+    if ($relativeForm) { $launcherSpec.RelativePath = $relativeForm }
 
-    Write-ShellLink `
-        -Path $Output `
-        -Spec $launcherSpec `
-        -RelativeLinkInfo | Out-Null
+    if ($isAbsolute) {
+        Write-ShellLink `
+            -Path $outPath `
+            -Spec $launcherSpec | Out-Null
+    }
+    else {
+        Write-ShellLink `
+            -Path $outPath `
+            -Spec $launcherSpec `
+            -RelativeLinkInfo | Out-Null
+    }
 
     $expectedLauncherSpec = @{
         TargetPath   = $launcherTarget
         Description  = $description
-        RelativePath = $relativeForm
         IconLocation = $Icon
     }
+    if ($relativeForm) { $expectedLauncherSpec.RelativePath = $relativeForm }
 
     $validation = Validate-ShellLink `
-        -Path $Output `
+        -Path $outPath `
         -ExpectedTarget $relativeForm `
         -ExpectedSpec $expectedLauncherSpec
 

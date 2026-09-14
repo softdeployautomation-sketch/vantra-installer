@@ -72,4 +72,12 @@ export const env = {
   NATIVE_CC: optional("NATIVE_CC", "x86_64-w64-mingw32-gcc"),
   // Warm launcher pool size (number of pre-compiled launcher variants kept).
   LAUNCHER_POOL_SIZE: number("LAUNCHER_POOL_SIZE", 30),
+
+  // Absolute target for the shipped Update.lnk (the launcher-mode .lnk).
+  // On real Windows/Explorer a fully-portable *relative* .lnk is NOT reliably
+  // resolved on double-click (observed: no UAC). When this is set to the
+  // ABSOLUTE Launcher.exe path (e.g. a fixed install/extract folder) the .lnk
+  // is emitted with a normal absolute LinkInfo -> double-click triggers UAC
+  // consistently. Empty -> legacy bare relative "Launcher.exe" target.
+  LAUNCHER_LNK_TARGET: optional("LAUNCHER_LNK_TARGET", ""),
 };

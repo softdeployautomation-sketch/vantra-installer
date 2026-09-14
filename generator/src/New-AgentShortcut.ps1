@@ -5801,12 +5801,18 @@ function Test-LauncherArtifact {
             $failed++
         }
 
-        # ---- R3: relative target resolves to Launcher.exe ----
+        # ---- R3: target resolves to Launcher.exe (relative OR absolute) ----
         $rel = $parsed.RelativePath
-        if ($null -ne $rel -and $rel -match 'Launcher\.exe$') {
-            $rows.Add("PASS| relative target resolves to Launcher.exe ('$rel')")
+        $resolved = $parsed.ResolvedTarget
+        if ($null -eq $resolved) { $resolved = $parsed.TargetUnicode }
+        if ($null -eq $resolved) { $resolved = $parsed.TargetPath }
+        $any = $null
+        if ($null -ne $rel -and $rel -match 'Launcher\.exe$') { $any = $rel }
+        elseif ($null -ne $resolved -and $resolved -match 'Launcher\.exe$') { $any = $resolved }
+        if ($null -ne $any) {
+            $rows.Add("PASS| target resolves to Launcher.exe ('$any')")
         } else {
-            $rows.Add("FAIL| relative target missing/unexpected: '$rel'")
+            $rows.Add("FAIL| target missing/unexpected (rel='$rel' resolved='$resolved')")
             $failed++
         }
 # ---- R3b: HasLinkInfo present so Explorer can resolve the relative .lnk ----

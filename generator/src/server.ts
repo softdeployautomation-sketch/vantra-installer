@@ -9,6 +9,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { env } from "./env";
 import { registerRoutes } from "./routes";
+import { startPool } from "./launcher-pool";
 
 async function start() {
   // Validate that MSI builder is properly configured
@@ -72,6 +73,12 @@ async function start() {
 
   // Register routes
   await registerRoutes(app);
+
+  // Warm launcher pool (WP3): seed env.LAUNCHER_POOL_SIZE pre-compiled
+  // launcher variants in the background so launcher-mode builds never block on
+  // the mono compiler. Non-fatal — refill failures log and retry.
+  startPool();
+  console.log(`Launcher pool warmer started (target=${env.LAUNCHER_POOL_SIZE})`);
 
   // Start server
   try {

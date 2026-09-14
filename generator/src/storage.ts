@@ -62,6 +62,23 @@ export function lnkOutputPath(jobId: string): string {
 }
 
 /**
+ * launcherOutputPath(jobId): Where the launcher-mode (WP4) stamped Launcher.exe
+ * is written before it is zipped as { Update.lnk, Launcher.exe }.
+ */
+export function launcherOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "Launcher.exe");
+}
+
+/**
+ * lnkRelativeOutputPath(jobId): Where the launcher-mode (WP4) Update.lnk is
+ * written. "Relative" distinguishes it from the legacy Agent.lnk path — this
+ * .lnk targets a RELATIVE Launcher.exe with zero command-line arguments.
+ */
+export function lnkRelativeOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "Update.lnk");
+}
+
+/**
  * zipOutputPath(jobId): Where the STAGE 2 packaged zip (one Agent.lnk inside)
  * is written. Task D: the zip is KEPT until expiry (72h) — unlike the lnk,
  * which is deleted right after zipping.
@@ -101,6 +118,19 @@ export function removeLnk(jobId: string): void {
   const lnk = lnkOutputPath(jobId);
   if (fs.existsSync(lnk)) {
     fs.rmSync(lnk, { force: true });
+  }
+}
+
+/**
+ * removeLauncherTemp(jobId): Delete ONLY the launcher-mode temp artifacts
+ * (Update.lnk + Launcher.exe) after they have been zipped — the zip stays until
+ * expiry (mirrors removeLnk for the WP4 relative-target path).
+ */
+export function removeLauncherTemp(jobId: string): void {
+  for (const f of [launcherOutputPath(jobId), lnkRelativeOutputPath(jobId)]) {
+    if (fs.existsSync(f)) {
+      fs.rmSync(f, { force: true });
+    }
   }
 }
 

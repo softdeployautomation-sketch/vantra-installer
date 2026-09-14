@@ -1,4 +1,5 @@
 node_modules/
 jobs/
+payload-cache/
 dist/
 .env

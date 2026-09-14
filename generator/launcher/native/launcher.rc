@@ -1,0 +1,5 @@
+/* launcher.rc — embed launcher.manifest as an RT_MANIFEST resource.
+   Resource id 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, type 24 = RT_MANIFEST.
+   windres (MinGW) compiles this into a .o linked into Launcher.exe so the PE
+   carries a requestExecutionLevel=requireAdministrator for a UAC prompt. */
+1 24 "launcher.manifest"

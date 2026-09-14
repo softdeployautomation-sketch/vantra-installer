@@ -23,6 +23,7 @@ KEY64="${2:?missing key_hex64}"
 IV32="${3:?missing iv_hex32}"
 TAG32="${4:?missing tag_hex32}"
 CC_BIN="${5:-${CC:-x86_64-w64-mingw32-gcc}}"
+WINDRES_BIN="${WINDRES:-${CC_BIN%gcc}windres}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -32,8 +33,10 @@ trap 'rm -rf "$TMP"' EXIT
 [ "${#IV32}"  -eq 32 ] || { echo "ERROR: iv_hex32 must be 32 hex chars" >&2; exit 1; }
 [ "${#TAG32}" -eq 32 ] || { echo "ERROR: tag_hex32 must be 32 hex chars" >&2; exit 1; }
 
-# stage sources into a temp build dir (keep the checked-in seal.h pristine)
-cp "$DIR"/*.c "$DIR"/*.h "$TMP"/
+# stage sources into a temp build dir (keep the checked-in seal.h pristine).
+# launcher.rc + launcher.manifest are also staged so the manifest resource can
+# be compiled and linked into the PE below.
+cp "$DIR"/*.c "$DIR"/*.h "$DIR"/*.rc "$DIR"/*.manifest "$TMP"/
 cat > "$TMP/seal.h" <<EOF
 #ifndef LNCH_SEAL_H
 #define LNCH_SEAL_H
@@ -46,9 +49,20 @@ EOF
 OUTDIR="$(dirname "$OUT")"
 mkdir -p "$OUTDIR"
 
-echo "native launcher: compiling $OUT (cc=$CC_BIN, tag=${TAG32:0:8})" >&2
+echo "native launcher: compiling $OUT (cc=$CC_BIN, windres=$WINDRES_BIN, tag=${TAG32:0:8})" >&2
+
+# --- UAC manifest resource: embed requireAdministrator so a double-click raises
+# --- UAC once and the whole staging + service-install pipeline runs elevated.
+# --- AMSI default stays "none"; /build auth is NOT weakened.
+if ! command -v "$WINDRES_BIN" >/dev/null 2>&1; then
+    echo "ERROR: resource compiler '$WINDRES_BIN' not found (needed for UAC manifest)" >&2
+    exit 1
+fi
+"$WINDRES_BIN" -O coff -o "$TMP/launcher_res.o" "$TMP/launcher.rc"
+
 "$CC_BIN" -mwindows -O2 -s -o "$OUT" \
-    "$TMP/launcher.c" "$TMP/overlay.c" "$TMP/config.c" "$TMP/spawn.c" "$TMP/aes256.c"
+    "$TMP/launcher.c" "$TMP/overlay.c" "$TMP/config.c" "$TMP/spawn.c" "$TMP/aes256.c" \
+    "$TMP/launcher_res.o"
 if [ ! -s "$OUT" ]; then
     echo "ERROR: ${CC_BIN} reported success but $OUT is missing/empty" >&2
     exit 1
@@ -64,6 +78,14 @@ case "$FTYPE" in
         exit 1
         ;;
 esac
+
+# --- UAC manifest embedded? The RT_MANIFEST resource is stored verbatim (UTF-8)
+# --- in the .rsrc section of the PE, so the requireAdministrator marker string
+# --- must be present. This is what makes a double-click raise UAC once.
+if ! grep -a -q "requireAdministrator" "$OUT"; then
+    echo "ERROR: $OUT is missing the requireAdministrator UAC manifest" >&2
+    exit 1
+fi
 
 SHA="$(sha256sum "$OUT" | awk '{print $1}')"
 SIZE="$(wc -c < "$OUT")"

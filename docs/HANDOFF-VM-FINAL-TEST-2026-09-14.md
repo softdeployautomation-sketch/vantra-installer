@@ -25,6 +25,12 @@ remaining step is the interactive VM double-click retest.** See "FIX IMPLEMENTED
   Running → device Online (watch the agent's `InstallNushell` GitHub fetch if the install stalls). Then FIX 2/3/4. See
   `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md` ("NEXT-AGENT PROMPT" at the bottom).
 
+- **FIX 3 (renameable names) — backend done + deployed.** `/build` accepts optional `flags.updateLinkName` +
+  `flags.innerFolder` (defaults byte-identical to the confirmed flow); the web-app UI + `flags.zipName` serve-name is
+  the next agent's step. Verified demo zip `['Setup.lnk','win/Launcher.exe','win/agent.bin']` with `.lnk` →
+  `.\win\Launcher.exe`. Full record + exactly how (WORKING FLOW + rename matrix + steps + next-agent prompt):
+  `docs/FIX_3_RENAMEABLE_NAMES_2026-09-15.md`.
+
 ## Environment / access (exact, verified)
 
 | System | Connect |

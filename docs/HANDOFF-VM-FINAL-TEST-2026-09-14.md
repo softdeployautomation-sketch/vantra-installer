@@ -5,6 +5,21 @@ record. **The corrected payload + `token_key` auth + requireAdministrator manife
 The three fixes below are now IMPLEMENTED, committed (`5e65526`), deployed to the VPS, and validated — the
 remaining step is the interactive VM double-click retest.** See "FIX IMPLEMENTED + DEPLOYED" below.
 
+## STATUS UPDATE (2026-09-15): FIX 1 implemented + deployed + VM prepped
+
+- **FIX 1 (portable file path) is DONE and DEPLOYED.** The zip now ships a top-level **`Update.cmd`** bootstrap
+  (`start "" "%~dp0Launcher.exe"`) as the double-click entry instead of the pinned `Update.lnk`; **`LAUNCHER_LNK_TARGET`
+  was removed** from `env.ts`/`launcher-build.ts`/the VPS `.env`. Committed `9b50e6f` (installer-dev).
+- **Deployed to VPS (2026-09-15):** changed files synced to `/opt/vantra-installer` (`rsync -aR`); the stale
+  `LAUNCHER_LNK_TARGET=C:/Users/myrat/Desktop/VantraFinal/Launcher.exe` line removed from `generator/.env`
+  (backup `.env.bak-fix1`); `systemctl restart vantra-msi-generator`; `/healthz` → `ready:true`
+  (launcherMode native, payload `920f59ba…`).
+- **VM prepped (2026-09-15):** old agent uninstalled — `sc stop/delete tacticalrmm` + `sc stop/delete "Mesh Agent"`,
+  `C:\Program Files\TacticalAgent` deleted, no leftover processes. A fresh install is a true from-scratch test.
+- **Remaining (next agent + operator):** live download acceptance of FIX 1, then FIX 2/3/4. The old device/agent
+  record in the RMM console is to be deleted by the operator. See `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md`
+  ("NEXT-AGENT PROMPT" at the bottom).
+
 ## Environment / access (exact, verified)
 
 | System | Connect |
@@ -155,12 +170,11 @@ uid `c4e7f9f5-…`. Files placed on VM at `C:\Users\myrat\Desktop\VantraFinal\` 
   `Mesh Agent` services **Running**; device **Online**; "TRMM installed" confirmation shown. Accepted.
 
 ### Remaining acceptance items (open; see `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md`)
-1. **File-path / portability:** `Update.lnk` currently bakes an ABSOLUTE target (`LAUNCHER_LNK_TARGET`)
-   (`C:/Users/myrat/Desktop/VantraFinal/Launcher.exe`). It only works if the files are in that exact folder (the user
-   had to copy them there). It must work from wherever the zip is unzipped (Downloads, Desktop, anywhere). Decisive
-   test (ShellExecute + `Invoke-Item`): a portable **relative** `.lnk` does NOT resolve on this host ("No application
-   is associated", empty target) — so the fix must use a correct relative-IDList `.lnk`, OR a portable
-   `Update.cmd`/`start %~dp0` bootstrap, OR a documented fixed install folder. See FIX 1 in the task file.
+1. **File-path / portability — IMPLEMENTED + DEPLOYED + VM PREPPED (FIX 1, commit `9b50e6f`); pending live download
+   test.** The old `Update.lnk` absolute-target (`LAUNCHER_LNK_TARGET`) bug is replaced by a portable top-level
+   **`Update.cmd`** (`start "" "%~dp0Launcher.exe"`, resolves from any extract folder; UAC via `Launcher.exe`'s
+   requireAdministrator manifest). The relative-`.lnk` approach was NOT used (proven non-resolving on this host).
+   Remaining: real download flow -> double-click `Update.cmd` -> UAC -> Online (see task file "NEXT-AGENT PROMPT").
 2. **Zip structure:** launcher inside a subfolder of the zip; only `Update.lnk` visible first on unzip.
 3. **Renamable names:** `Agent.zip`, `Update.lnk`, `agent.bin`, `Launcher.exe` + inner folder settable at zip creation
    (UI input).

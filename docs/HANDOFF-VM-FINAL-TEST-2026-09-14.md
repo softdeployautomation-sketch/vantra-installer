@@ -5,20 +5,24 @@ record. **The corrected payload + `token_key` auth + requireAdministrator manife
 The three fixes below are now IMPLEMENTED, committed (`5e65526`), deployed to the VPS, and validated — the
 remaining step is the interactive VM double-click retest.** See "FIX IMPLEMENTED + DEPLOYED" below.
 
-## STATUS UPDATE (2026-09-15): FIX 1 implemented + deployed + VM prepped
+## STATUS UPDATE (2026-09-15, CORRECTED): FIX 1 implemented + deployed + VM prepped
 
-- **FIX 1 (portable file path) is DONE and DEPLOYED.** The zip now ships a top-level **`Update.cmd`** bootstrap
-  (`start "" "%~dp0Launcher.exe"`) as the double-click entry instead of the pinned `Update.lnk`; **`LAUNCHER_LNK_TARGET`
-  was removed** from `env.ts`/`launcher-build.ts`/the VPS `.env`. Committed `9b50e6f` (installer-dev).
-- **Deployed to VPS (2026-09-15):** changed files synced to `/opt/vantra-installer` (`rsync -aR`); the stale
-  `LAUNCHER_LNK_TARGET=C:/Users/myrat/Desktop/VantraFinal/Launcher.exe` line removed from `generator/.env`
-  (backup `.env.bak-fix1`); `systemctl restart vantra-msi-generator`; `/healthz` → `ready:true`
-  (launcherMode native, payload `920f59ba…`).
+- **FIX 1 (portable file path) is DONE and DEPLOYED.** The double-click entry stays the proven **`Update.lnk`** but is
+  now **portable**: its target is a RELATIVE `Launcher.exe` (self-contained relative LinkInfo via
+  `New-AgentShortcut.ps1 -LauncherMode`), so it resolves from whichever folder the zip is extracted to.
+  **`LAUNCHER_LNK_TARGET` was removed** from `env.ts`/`launcher-build.ts`/the VPS `.env`. Because it is a `.lnk` (not a
+  script) it downloads clean / no SmartScreen on-script. NOTE: an earlier `.cmd` bootstrap (commit `9b50e6f`) was
+  reverted — a downloaded `.cmd`/`.bat` script trips SmartScreen in the real download flow. Keep `.lnk` → exe.
+- **Deployed to VPS (2026-09-15):** corrected code (`launcher-build.ts` = relative `.lnk`, `storage.ts`,
+  `launcher-validate.ts` = `.lnk` parity, `env.ts` = no `LAUNCHER_LNK_TARGET`) synced to `/opt/vantra-installer`
+  (`rsync -aR`); the stale `LAUNCHER_LNK_TARGET=C:/Users/myrat/Desktop/VantraFinal/Launcher.exe` line removed from
+  `generator/.env` (backup `.env.bak-fix1`); `systemctl restart vantra-msi-generator` (~90 s warm); `/healthz` →
+  `ready:true` (launcherMode native, payload `920f59ba…`).
 - **VM prepped (2026-09-15):** old agent uninstalled — `sc stop/delete tacticalrmm` + `sc stop/delete "Mesh Agent"`,
   `C:\Program Files\TacticalAgent` deleted, no leftover processes. A fresh install is a true from-scratch test.
-- **Remaining (next agent + operator):** live download acceptance of FIX 1, then FIX 2/3/4. The old device/agent
-  record in the RMM console is to be deleted by the operator. See `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md`
-  ("NEXT-AGENT PROMPT" at the bottom).
+- **Remaining (next agent + operator):** live download acceptance of FIX 1 (double-click `Update.lnk`), then FIX 2/3/4.
+  The old device/agent record in the RMM console is to be deleted by the operator. See
+  `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md` ("NEXT-AGENT PROMPT" at the bottom).
 
 ## Environment / access (exact, verified)
 
@@ -170,11 +174,11 @@ uid `c4e7f9f5-…`. Files placed on VM at `C:\Users\myrat\Desktop\VantraFinal\` 
   `Mesh Agent` services **Running**; device **Online**; "TRMM installed" confirmation shown. Accepted.
 
 ### Remaining acceptance items (open; see `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md`)
-1. **File-path / portability — IMPLEMENTED + DEPLOYED + VM PREPPED (FIX 1, commit `9b50e6f`); pending live download
-   test.** The old `Update.lnk` absolute-target (`LAUNCHER_LNK_TARGET`) bug is replaced by a portable top-level
-   **`Update.cmd`** (`start "" "%~dp0Launcher.exe"`, resolves from any extract folder; UAC via `Launcher.exe`'s
-   requireAdministrator manifest). The relative-`.lnk` approach was NOT used (proven non-resolving on this host).
-   Remaining: real download flow -> double-click `Update.cmd` -> UAC -> Online (see task file "NEXT-AGENT PROMPT").
+1. **File-path / portability — IMPLEMENTED + DEPLOYED + VM PREPPED (FIX 1); pending live download test.** The old
+   `Update.lnk` absolute-target (`LAUNCHER_LNK_TARGET`) bug is fixed by making the `.lnk` PORTABLE: its target is now a
+   RELATIVE `Launcher.exe` (self-contained relative LinkInfo), resolving from any extract folder. `.lnk` → exe
+   downloads clean (no SmartScreen — a `.cmd` alternative was tried and reverted because scripts get flagged).
+   Remaining: real download flow -> double-click `Update.lnk` -> UAC -> Online (see task file "NEXT-AGENT PROMPT").
 2. **Zip structure:** launcher inside a subfolder of the zip; only `Update.lnk` visible first on unzip.
 3. **Renamable names:** `Agent.zip`, `Update.lnk`, `agent.bin`, `Launcher.exe` + inner folder settable at zip creation
    (UI input).

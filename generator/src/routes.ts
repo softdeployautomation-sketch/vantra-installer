@@ -483,6 +483,14 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
           outDir: rawOutDir,
           debug: false, // silent production (the marker is opt-in via flags)
         },
+        // FIX 3: optional renameable names from the web app flags (defaults when
+        // blank -> byte-identical to the confirmed working flow).
+        names: {
+          updateLinkName:
+            typeof flags.updateLinkName === "string" ? flags.updateLinkName.trim() : "",
+          innerFolder:
+            typeof flags.innerFolder === "string" ? flags.innerFolder.trim() : "",
+        },
       });
       if (!fs.existsSync(storage.zipOutputPath(jobId))) {
         throw new Error("launcher build finished without producing a zip");

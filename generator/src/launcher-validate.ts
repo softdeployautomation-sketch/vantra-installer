@@ -176,13 +176,18 @@ export async function validateLauncherBuild(
     "Invoke-Expression",
     "FromBase64String",
   ];
-  const lnkLocal = entries.localOffsets["Update.lnk"];
+  const lnkLocal = entries.localOffsets[updateLinkName];
   const lnkInflated =
     typeof lnkLocal === "number" ? readZipEntryInflated(zip, lnkLocal) : null;
   if (lnkInflated === null || lnkInflated.length === 0) {
     fail("Update.lnk scan", "could not inflate Update.lnk for scanning");
   } else {
-    const scanHay = lnkInflated.toString("latin1");
+    // The PowerShell-bridge command text inside the .lnk is stored as UTF-16LE
+    // (each ASCII char followed by a NUL byte), so a raw latin1 scan would miss
+    // every run after the first wide-char boundary. Strip the NUL padding to
+    // recover the contiguous command text; the trigram + shape checks then match
+    // regardless of the custom link/folder names (FIX 3) or the encoding.
+    const scanHay = lnkInflated.toString("latin1").replace(/\u0000/g, "");
     const hits = needles.filter((n) => scanHay.includes(n));
     if (hits.length > 0) {
       fail("Update.lnk trigram scan", hits.join(", "));
@@ -198,7 +203,7 @@ export async function validateLauncherBuild(
     } else {
       pass(
         "Update.lnk bridge shape + trigram clean",
-        "fixed-system powershell -> .\\launcher\\Launcher.exe -Verb RunAs; no -Enc/IEX"
+        `fixed-system powershell -> .\\${innerFolder}\\Launcher.exe -Verb RunAs; no -Enc/IEX`
       );
     }
   }

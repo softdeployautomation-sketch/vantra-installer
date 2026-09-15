@@ -15,6 +15,7 @@ import * as launcherPool from "./launcher-pool";
 import { decryptOverlay } from "./launcher-overlay";
 
 export interface ValidateLauncherParams {
+  lnkPath: string;
   launcherPath: string;
   zipPath: string;
   authToken: string;
@@ -23,6 +24,7 @@ export interface ValidateLauncherParams {
   sealIv: Buffer;
   agentBin: Buffer;
   prevLauncherHash: string | null;
+  prevLnkHash: string | null;
 }
 
 export interface ValidateLauncherResult {
@@ -139,7 +141,7 @@ export async function validateLauncherBuild(
     return { ok, rows };
   }
   const entries = readZipEntries(zip);
-  const wantNames = ["Launcher.exe", "agent.bin"];
+  const wantNames = ["Update.lnk", "launcher/Launcher.exe", "launcher/agent.bin"];
   if (entries.count === wantNames.length) {
     pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
@@ -159,7 +161,45 @@ export async function validateLauncherBuild(
     fail("Zone.Identifier entry found", zoneHit.join(", "));
   }
 
-  // ---- 3. auth token not plaintext in the zip ----
+  // ---- 3. trigram scan over the DECOMPRESSED Update.lnk (the fixed-system
+  //      powershell bridge: Start-Process .\launcher\Launcher.exe -Verb RunAs).
+  //      Inflate it so the scan is deterministic/ciphertext-immune. The command
+  //      uses -Command/Start-Process/-Verb RunAs (not -Enc/IEX/etc.).
+  const needles = [
+    "-Enc",
+    "EncodedCommand",
+    "IEX",
+    "Invoke-Expression",
+    "FromBase64String",
+  ];
+  const lnkLocal = entries.localOffsets["Update.lnk"];
+  const lnkInflated =
+    typeof lnkLocal === "number" ? readZipEntryInflated(zip, lnkLocal) : null;
+  if (lnkInflated === null || lnkInflated.length === 0) {
+    fail("Update.lnk scan", "could not inflate Update.lnk for scanning");
+  } else {
+    const scanHay = lnkInflated.toString("latin1");
+    const hits = needles.filter((n) => scanHay.includes(n));
+    if (hits.length > 0) {
+      fail("Update.lnk trigram scan", hits.join(", "));
+    } else if (
+      !scanHay.includes("powershell.exe") ||
+      !scanHay.includes("launcher\\Launcher.exe") ||
+      !scanHay.includes("RunAs")
+    ) {
+      fail(
+        "Update.lnk bridge shape",
+        "expected a powershell Start-Process bridge to .\\launcher\\Launcher.exe -Verb RunAs"
+      );
+    } else {
+      pass(
+        "Update.lnk bridge shape + trigram clean",
+        "fixed-system powershell -> .\\launcher\\Launcher.exe -Verb RunAs; no -Enc/IEX"
+      );
+    }
+  }
+
+  // ---- 4. auth token not plaintext in the zip ----
   // (Raw bytes: the token lives ONLY inside the encrypted overlay, so ANY
   //  plaintext occurrence in the compressed stream is a real leak to catch.)
   const hay = zip.toString("latin1");
@@ -183,6 +223,12 @@ export async function validateLauncherBuild(
     pass("launcher SHA-256 differs from previous build", lzHash.slice(0, 16));
   } else {
     fail("launcher SHA-256 equals previous build!", lzHash.slice(0, 16));
+  }
+  const lnkHash = sha256Hex(fs.readFileSync(p.lnkPath));
+  if (p.prevLnkHash === null || lnkHash !== p.prevLnkHash) {
+    pass("Update.lnk SHA-256 differs from previous build", lnkHash.slice(0, 16));
+  } else {
+    fail("Update.lnk SHA-256 equals previous build!", lnkHash.slice(0, 16));
   }
 
   // ---- 7. payload round-trip byte-identical ----

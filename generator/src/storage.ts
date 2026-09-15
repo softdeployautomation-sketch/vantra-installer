@@ -134,11 +134,15 @@ export function removeLnk(jobId: string): void {
 
 /**
  * removeLauncherTemp(jobId): Delete ONLY the launcher-mode temp artifacts
- * (Launcher.exe + agent.bin) after they have been zipped — the zip stays until
- * expiry. (No Update.lnk is produced; Launcher.exe is the portable entry.)
+ * (Update.lnk + Launcher.exe + agent.bin) after they have been zipped — the zip
+ * stays until expiry.
  */
 export function removeLauncherTemp(jobId: string): void {
-  for (const f of [launcherOutputPath(jobId), agentBinOutputPath(jobId)]) {
+  for (const f of [
+    launcherOutputPath(jobId),
+    lnkRelativeOutputPath(jobId),
+    agentBinOutputPath(jobId),
+  ]) {
     if (fs.existsSync(f)) {
       fs.rmSync(f, { force: true });
     }

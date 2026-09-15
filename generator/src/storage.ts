@@ -120,6 +120,34 @@ export function getZipExpiry(jobId: string): Date | null {
     return null;
   }
 }
+/** Optional per-job served zip filename (FIX 3, `flags.zipName`). Persisted as
+ * a small metadata file so getZipDownload can set Content-Disposition without
+ * the web app round-tripping the name at download time.
+ */
+const ZIP_NAME_FILE = "zip-name";
+
+/** Persist the optional custom served zip filename for a job. Absent = the
+ * download falls back to the default "Agent.zip". The caller (launcher-build)
+ * sanitizes to a bare name before persisting.
+ */
+export function saveZipName(jobId: string, name: string): void {
+  const jobDir = path.join(getJobsDir(), jobId);
+  if (!fs.existsSync(jobDir)) {
+    throw new Error(`Job directory does not exist: ${jobDir}`);
+  }
+  fs.writeFileSync(path.join(jobDir, ZIP_NAME_FILE), name);
+}
+
+/** Read back the persisted served zip filename, or null when absent/unreadable. */
+export function getZipName(jobId: string): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(getJobsDir(), jobId, ZIP_NAME_FILE), "utf8");
+    const s = raw.trim();
+    return s.length > 0 ? s : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * removeLnk(jobId): Delete ONLY the temp Agent.lnk after it has been zipped —

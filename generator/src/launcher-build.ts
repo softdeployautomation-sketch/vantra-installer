@@ -65,6 +65,7 @@ export interface LauncherRunOutput {
 export interface LauncherNames {
   updateLinkName?: string; // the .lnk entry name (default "Update.lnk")
   innerFolder?: string; // the subfolder holding launcher+payload (default "launcher")
+  zipName?: string; // the served zip download filename (default "Agent.zip")
 }
 
 const LNK_TIMEOUT_MS = 120000; // pwsh New-AgentShortcut.ps1 (bridge .lnk build)
@@ -154,6 +155,11 @@ export async function runLauncherBuild(opts: {
   };
   const updateLinkName = clean(opts.names?.updateLinkName, "Update.lnk");
   const innerFolder = clean(opts.names?.innerFolder, "launcher");
+  // FIX 3: custom served zip download name (optional; fallback "Agent.zip").
+  // Sanitized with the same bare-name rule, then persisted per job so
+  // getZipDownload can set Content-Disposition at download time.
+  const zipName = clean(opts.names?.zipName, "Agent.zip");
+  storage.saveZipName(jobId, zipName);
 
   // 1. warm launcher (compile-on-demand only when the pool is empty).
   const entry = await launcherPool.take();

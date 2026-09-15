@@ -490,6 +490,9 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
             typeof flags.updateLinkName === "string" ? flags.updateLinkName.trim() : "",
           innerFolder:
             typeof flags.innerFolder === "string" ? flags.innerFolder.trim() : "",
+          // served zip download filename (fallback "Agent.zip").
+          zipName:
+            typeof flags.zipName === "string" ? flags.zipName.trim() : "",
         },
       });
       if (!fs.existsSync(storage.zipOutputPath(jobId))) {
@@ -676,7 +679,10 @@ async function getZipDownload(request: FastifyRequest, reply: FastifyReply) {
   }
 
   reply.header("Content-Type", "application/zip");
-  reply.header("Content-Disposition", 'attachment; filename="Agent.zip"');
+  // FIX 3: serve the custom persisted zip name when present (falls back to the
+  // default "Agent.zip" for legacy/unspecified builds).
+  const zipName = storage.getZipName(jobId) ?? "Agent.zip";
+  reply.header("Content-Disposition", `attachment; filename="${zipName}"`);
 
   return reply.send(fs.createReadStream(zipPath));
 }

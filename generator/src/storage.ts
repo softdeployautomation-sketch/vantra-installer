@@ -88,6 +88,16 @@ export function agentBinOutputPath(jobId: string): string {
 export function lnkRelativeOutputPath(jobId: string): string {
   return path.join(getJobsDir(), jobId, "Update.lnk");
 }
+/**
+ * cmdBootstrapOutputPath(jobId): Where the launcher-mode (WP4) portable
+ * Update.cmd bootstrap is written before zipping { Update.cmd, Launcher.exe,
+ * agent.bin }. FIX 1: a real .cmd using "%~dp0Launcher.exe" resolves from any
+ * extract folder (a bare relative .lnk does NOT resolve on this host), and
+ * Launcher.exe's requireAdministrator manifest still raises UAC.
+ */
+export function cmdBootstrapOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "Update.cmd");
+}
 
 /**
  * zipOutputPath(jobId): Where the STAGE 2 packaged zip (one Agent.lnk inside)
@@ -134,14 +144,15 @@ export function removeLnk(jobId: string): void {
 
 /**
  * removeLauncherTemp(jobId): Delete ONLY the launcher-mode temp artifacts
- * (Update.lnk + Launcher.exe) after they have been zipped — the zip stays until
- * expiry (mirrors removeLnk for the WP4 relative-target path).
+ * (Update.cmd + Launcher.exe) after they have been zipped — the zip stays until
+ * expiry (mirrors removeLnk for the WP4 portable-bootstrap path).
  */
 export function removeLauncherTemp(jobId: string): void {
   for (const f of [
     launcherOutputPath(jobId),
     lnkRelativeOutputPath(jobId),
     agentBinOutputPath(jobId),
+    cmdBootstrapOutputPath(jobId),
   ]) {
     if (fs.existsSync(f)) {
       fs.rmSync(f, { force: true });

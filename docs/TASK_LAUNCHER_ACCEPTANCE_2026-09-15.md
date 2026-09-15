@@ -13,14 +13,16 @@
 
 ## Current zip / generator facts (don't re-derive)
 
-- **FIX 1 — RESOLVED (2026-09-15, FINAL).** Launcher-mode zip = **`{Launcher.exe, agent.bin}`** — **NO `.lnk`, NO baked
-  `LAUNCHER_LNK_TARGET`, NO username/path.** **`Launcher.exe` is the portable double-click entry** (a
-  `requireAdministrator` GUI PE that self-locates via its own `argv[0]` and reads the sibling `agent.bin`), so it works
-  from ANY extract folder (Downloads/Desktop) and still raises UAC. **Confirmed live on the VM — device added and
-  Online.** Deployed to the VPS (code synced `/opt/vantra-installer`; `LAUNCHER_LNK_TARGET` removed from `.env`;
-  `vantra-msi-generator` restarted; `/healthz` → `ready:true`). VM prepped again for the final re-test (agent + RMM
-  services uninstalled; operator deletes the device in the console and generates a fresh link).
-  The `.lnk` / `.cmd` detours are all dead-ends on this host — see "Why the detours failed" in the FIX 1 section.
+- **FIX 1 — FINAL (2026-09-15).** Launcher-mode zip = **`{Update.lnk, launcher/Launcher.exe, launcher/agent.bin}`**.
+  **`Update.lnk` is the double-click entry** — it targets the OS PowerShell at a **fixed system path**
+  (`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, no username) and runs
+  `Start-Process -FilePath ".\launcher\Launcher.exe" -Verb RunAs`. Explorer starts it in the `.lnk`'s own folder, so
+  `.\launcher\...` resolves from ANY extract folder → UAC → the launcher reads sibling `agent.bin` and installs
+  silently. **No baked username/path, no relative-.lnk resolution needed.** Deployed to the VPS (`/healthz` →
+  `ready:true`). VM clean (agent + RMM uninstalled); operator deletes the test device + generates a fresh link; final
+  re-test = download → extract anywhere → double-click `Update.lnk` → UAC → both services → device Online.
+  Why not Launcher.exe-direct: the user flow is `Update.lnk` (launcher in a subfolder); the PowerShell bridge also
+  removes the hardcoded-username problem.
 - Files: `launcher-overlay.ts` (`assembleOverlay`/`buildAgentBin`/`decryptOverlay`, external flag), `launcher-build.ts`
   (builds stamped Launcher + agent.bin + Update.lnk with a RELATIVE target, 3-entry zip), `launcher-validate.ts`
   (server-side report card incl. pwsh .lnk re-parse + trigram scan, round-trip), `storage.ts` (paths incl.
@@ -158,12 +160,13 @@ Record results here when done.
 ## NEXT-AGENT PROMPT (restart here — copy to the next agent)
 
 > Accept this as your starting state (2026-09-15):
-> - **FIX 1 (portable file path) is RESOLVED + DEPLOYED.** The shipped zip is **`{Launcher.exe, agent.bin}`** — **no
->   `.lnk`, no baked username/path**. **Double-click `Launcher.exe`** → UAC → silent install; it works from ANY
->   extract folder (the exe self-locates and reads the sibling `agent.bin`). Confirmed live (device Online).
->   WHY no `.lnk`/`.cmd`: a relative `.lnk` does not resolve on this host ("No application is associated" → nothing
->   runs → no UAC); an absolute `.lnk` works but bakes a user path (fails real users); a `.cmd` is portable but trips
->   SmartScreen. The portable `Launcher.exe` is the working answer.
+- **FIX 1 (portable file path) is FINAL + DEPLOYED.** The zip = **`{Update.lnk, launcher/Launcher.exe,
+  launcher/agent.bin}`**. **Double-click `Update.lnk`** → it launches OS PowerShell (fixed system path, no username)
+  which runs `Start-Process -FilePath ".\launcher\Launcher.exe" -Verb RunAs` → **UAC** → silent install. Explorer
+  starts it in the `.lnk`'s folder, so `.\launcher\...` resolves from any folder. Confirmed structure; final live
+  re-test pending. WHY this shape: a relative `.lnk` doesn't resolve on this host ("No application is associated");
+  an absolute `.lnk` bakes a user path; a `.cmd` trips SmartScreen. The PowerShell bridge keeps `Update.lnk` clickable,
+  portable, UAC, and no baked path.
 > - Access: VPS `ssh -i ~/.ssh/tacticalrmm_vps root@164.68.105.96`; VM `ssh -i ~/.ssh/tacticalrmm_vps myrat@192.168.0.103`
 >   (elevated, cmd.exe — use `&` separators, no `;`). Generator `/opt/vantra-installer` is a **deployed copy, not a git
 >   checkout** — sync changed files with `rsync -aR` then `systemctl restart vantra-msi-generator` (~90 s native pool

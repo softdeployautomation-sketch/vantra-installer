@@ -22,9 +22,12 @@
 
 typedef struct {
     int flags;
-    uint8_t *payload;
-    size_t payload_len;
+    int external;          /* payload stored in sibling agent.bin (FLAG 0x02) */
+    uint8_t *payload;      /* decrypted agent (NULL when external) */
+    size_t payload_len;    /* decrypted/cipher length */
     char *config;
+    uint8_t kb[32];        /* per-build payload key (from envelope) */
+    uint8_t iv_pay[16];    /* per-build payload IV (from envelope) */
 } Overlay;
 
 /* overlay.c */

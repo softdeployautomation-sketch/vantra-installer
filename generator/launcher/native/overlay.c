@@ -84,9 +84,31 @@ int overlay_parse(const uint8_t *buf, size_t n, Overlay *ov) {
     uint32_t cfgLen = read_u32le(buf, (int)(n - 12));
     uint32_t payLen = read_u32le(buf, (int)(n - 8));
     if (cfgLen == 0 || payLen == 0 || cfgLen > MAX_CFG || payLen > MAX_PAY) return 0;
-    size_t ovLen = (size_t)HDR_LEN + ENV_LEN + cfgLen + payLen;
-    if (n < ovLen + 12) return 0;
-    size_t off = n - ovLen - 12;
+
+    /* Determine the overlay layout. With PAYLOAD_EXTERNAL the [pay] bytes are
+     * NOT in this file (they live in the sibling agent.bin), so the VNTR header
+     * sits at n - (HDR+ENV+cfgLen) - 12 instead of n - (HDR+ENV+cfgLen+payLen) - 12.
+     * Try the external offset first; fall back to inline. */
+    int external = 0;
+    size_t off;
+    size_t req_ext = (size_t)HDR_LEN + ENV_LEN + cfgLen + 12;
+    if (n >= req_ext) {
+        size_t e = n - req_ext;
+        if (buf[e] == 'V' && buf[e + 1] == 'N' && buf[e + 2] == 'T' && buf[e + 3] == 'R') {
+            external = (buf[e + 5] & 0x02) ? 1 : 0;
+            off = e;
+        } else {
+            size_t need = (size_t)HDR_LEN + ENV_LEN + cfgLen + payLen + 12;
+            if (n < need) return 0;
+            off = n - need;
+        }
+    } else {
+        size_t need = (size_t)HDR_LEN + ENV_LEN + cfgLen + payLen + 12;
+        if (n < need) return 0;
+        off = n - need;
+    }
+
+    if (off < HDR_LEN + ENV_LEN) return 0;
     if (buf[off] != 'V' || buf[off + 1] != 'N' || buf[off + 2] != 'T' || buf[off + 3] != 'R') return 0;
     if (buf[off + 4] != 1) return 0;
     if (read_u32le(buf, (int)(off + 8)) != ENV_LEN ||
@@ -94,6 +116,9 @@ int overlay_parse(const uint8_t *buf, size_t n, Overlay *ov) {
         read_u32le(buf, (int)(off + 16)) != payLen) return 0;
 
     ov->flags = buf[off + 5] & 0xff;
+    ov->external = external;
+    ov->payload = NULL;
+    ov->payload_len = payLen;
 
     size_t klen = 0, ilen = 0;
     uint8_t *skey = hex_decode(SEAL_KEY_64, &klen);
@@ -117,19 +142,25 @@ int overlay_parse(const uint8_t *buf, size_t n, Overlay *ov) {
     memcpy(kb, env, 32);
     memcpy(ivPay, env + 32, 16);
     memcpy(ivCfg, env + 48, 16);
+    memcpy(ov->kb, kb, 32);
+    memcpy(ov->iv_pay, ivPay, 16);
 
     char *cfg = (char *)malloc((size_t)cfgLen + 1);
     if (!cfg) return 0;
     memcpy(cfg, &buf[off + HDR_LEN + ENV_LEN], cfgLen);
     aes256_ctr_xor(kb, ivCfg, (uint8_t *)cfg, cfgLen);
     cfg[cfgLen] = 0;
+    ov->config = cfg;
 
+    if (external) {
+        /* Payload ciphertext is NOT in this file; launcher.c reads agent.bin and
+         * decrypts with ov->kb/ov->iv_pay. ov->payload stays NULL. */
+        return 1;
+    }
     uint8_t *pay = (uint8_t *)malloc(payLen);
-    if (!pay) { free(cfg); return 0; }
+    if (!pay) { free(cfg); ov->config = NULL; return 0; }
     memcpy(pay, &buf[off + HDR_LEN + ENV_LEN + cfgLen], payLen);
     aes256_ctr_xor(kb, ivPay, pay, payLen);
-
-    ov->config = cfg;
     ov->payload = pay;
     ov->payload_len = payLen;
     return 1;

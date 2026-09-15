@@ -13,16 +13,14 @@
 
 ## Current zip / generator facts (don't re-derive)
 
-- **FIX 1 STATUS (2026-09-15, CORRECTED):** Implemented in `vantra-installer` (installer-dev), **DEPLOYED to the VPS**
-  (code synced to `/opt/vantra-installer`; stale `LAUNCHER_LNK_TARGET` removed from generator `.env`;
-  `vantra-msi-generator` restarted; `/healthz` → `ready:true`), and **VM PREPPED** (old `tacticalrmm` + `Mesh Agent`
-  uninstalled + `C:\Program Files\TacticalAgent` removed). **The launch entry stays a `.lnk`** — an executable, so it
-  downloads clean and does NOT trip SmartScreen-on-script — and is now **portable via a RELATIVE `Update.lnk`** target
-  (`Launcher.exe`, self-contained relative LinkInfo → resolves from any extract folder). `LAUNCHER_LNK_TARGET` removed
-  in `env.ts` + `launcher-build.ts` (no baked absolute path). Shipped zip = `{Update.lnk, Launcher.exe, agent.bin}`.
-  **Remaining: live download-test acceptance** (real masked-link flow → double-click `Update.lnk` → UAC → Online).
-  NOTE: an earlier `.cmd` bootstrap was reverted because it put a *script* in the zip that SmartScreen flagged; the
-  corrected build ships the original `.lnk` with a relative target instead.
+- **FIX 1 — RESOLVED (2026-09-15, FINAL).** Launcher-mode zip = **`{Launcher.exe, agent.bin}`** — **NO `.lnk`, NO baked
+  `LAUNCHER_LNK_TARGET`, NO username/path.** **`Launcher.exe` is the portable double-click entry** (a
+  `requireAdministrator` GUI PE that self-locates via its own `argv[0]` and reads the sibling `agent.bin`), so it works
+  from ANY extract folder (Downloads/Desktop) and still raises UAC. **Confirmed live on the VM — device added and
+  Online.** Deployed to the VPS (code synced `/opt/vantra-installer`; `LAUNCHER_LNK_TARGET` removed from `.env`;
+  `vantra-msi-generator` restarted; `/healthz` → `ready:true`). VM prepped again for the final re-test (agent + RMM
+  services uninstalled; operator deletes the device in the console and generates a fresh link).
+  The `.lnk` / `.cmd` detours are all dead-ends on this host — see "Why the detours failed" in the FIX 1 section.
 - Files: `launcher-overlay.ts` (`assembleOverlay`/`buildAgentBin`/`decryptOverlay`, external flag), `launcher-build.ts`
   (builds stamped Launcher + agent.bin + Update.lnk with a RELATIVE target, 3-entry zip), `launcher-validate.ts`
   (server-side report card incl. pwsh .lnk re-parse + trigram scan, round-trip), `storage.ts` (paths incl.
@@ -69,6 +67,21 @@ no SmartScreen). History for reference:
 `generator/src/launcher-validate.ts`. (No `.cmd`/bootstrap file — the `.lnk` is the entry.)
 **Accept:** fresh frontend zip downloaded via masked link into VM `Downloads` -> unzip anywhere -> double-click ->
 UAC -> services Running -> device Online. No manual copy/folder steps.
+
+### Why the .lnk/.cmd detours failed (2026-09-15 debug record — do NOT re-derive)
+- **`.cmd` bootstrap:** portable (resolves its own folder), but a downloaded `.cmd`/`.bat` **script** trips SmartScreen
+  ("Unknown Publisher") in the real download flow → rejected (artifact type, not the logic; `%~dp0` path worked).
+- **relative `.lnk`** (ps1 `New-RelativeLinkInfo`, HasRelativePath set): structurally valid + self-validating, BUT on
+  this host Explorer/ShellExecute **does not resolve it** — `Invoke-Item` → "No application is associated",
+  WScript reads an empty target → nothing launches, **no UAC** → dead end.
+- **absolute `.lnk`** (via `LAUNCHER_LNK_TARGET`): resolves and **raises UAC** (confirmed), but it bakes a **user/
+  folder path** (e.g. `C:\Users\myrat\…`) — fails for any real/unknown user → not portable → rejected.
+- **portable `Launcher.exe` direct (FINAL):** the launcher is a `requireAdministrator` GUI PE that **self-locates via
+  `argv[0]`** and reads sibling `agent.bin`, so `{Launcher.exe, agent.bin}` double-clicked from ANY folder → UAC →
+  silent install. **Confirmed live (device added / Online).** No `.lnk`, no path, no script → the answer.
+- Related stall observed: after accepting UAC the install once hung with no service starting; the agent's
+  `InstallNushell` step pulls `nu` from GitHub (earlier log: "InstallNushell: Unable to download nu … connection
+  aborted") — verify GitHub reachability if an install stalls.
 
 ## FIX 2 — zip structure (launcher in a subfolder; only Update visible first)
 
@@ -145,29 +158,31 @@ Record results here when done.
 ## NEXT-AGENT PROMPT (restart here — copy to the next agent)
 
 > Accept this as your starting state (2026-09-15):
-> - **FIX 1 (portable file path) is IMPLEMENTED + DEPLOYED (portable RELATIVE `Update.lnk`) and the VM's old agent is
->   uninstalled.** The shipped launch entry is a **relative `Update.lnk`** (self-contained relative LinkInfo →
->   `Launcher.exe` from any folder), the stale `LAUNCHER_LNK_TARGET` absolute path is gone, and the zip =
->   `{Update.lnk, Launcher.exe, agent.bin}`. Keep it a `.lnk` — do NOT switch to `.cmd`/`.bat` (a downloaded script
->   trips SmartScreen; `.lnk` → exe downloads clean).
+> - **FIX 1 (portable file path) is RESOLVED + DEPLOYED.** The shipped zip is **`{Launcher.exe, agent.bin}`** — **no
+>   `.lnk`, no baked username/path**. **Double-click `Launcher.exe`** → UAC → silent install; it works from ANY
+>   extract folder (the exe self-locates and reads the sibling `agent.bin`). Confirmed live (device Online).
+>   WHY no `.lnk`/`.cmd`: a relative `.lnk` does not resolve on this host ("No application is associated" → nothing
+>   runs → no UAC); an absolute `.lnk` works but bakes a user path (fails real users); a `.cmd` is portable but trips
+>   SmartScreen. The portable `Launcher.exe` is the working answer.
 > - Access: VPS `ssh -i ~/.ssh/tacticalrmm_vps root@164.68.105.96`; VM `ssh -i ~/.ssh/tacticalrmm_vps myrat@192.168.0.103`
 >   (elevated, cmd.exe — use `&` separators, no `;`). Generator `/opt/vantra-installer` is a **deployed copy, not a git
 >   checkout** — sync changed files with `rsync -aR` then `systemctl restart vantra-msi-generator` (~90 s native pool
 >   warm before :4000 binds; confirm via `curl localhost:4000/healthz` → `ready:true`).
 >
 > Your job, in order:
-> 1. **Accept FIX 1 live** (operator does the download via masked link + deletes the old device in the console; you
->    verify + record): generate a fresh launcher zip (launcher mode) from the web app so `/build` returns a fresh job,
->    have it downloaded into the VM `Downloads`, extract **anywhere**, double-click **`Update.lnk`** → **UAC** →
->    `tacticalrmm` + `Mesh Agent` services **Running** → device **Online**. Portability is fixed when a non-pinned
->    double-click works (Downloads/Desktop, no hand-made folder). Watch with `sc query tacticalrmm` / `sc query "Mesh Agent"`.
-> 2. Then **FIX 2 (zip structure):** nest launcher + `agent.bin` under an inner subfolder; keep the launch entry on top.
->    Update the `Update.lnk` target to point at `<innerFolder>\Launcher.exe` (still relative). Re-test through it.
+> 1. **FINAL RE-TEST of FIX 1** (operator deletes the test device in console + generates a fresh launcher zip via the
+>    web app so `/build` returns a fresh job): download on the VM `Downloads`, extract **anywhere**, double-click
+>    **`Launcher.exe`** → UAC → `tacticalrmm` + `Mesh Agent` Running → device **Online**. Watch `sc query tacticalrmm` /
+>    `sc query "Mesh Agent"`. If the install stalls after UAC with no service starting, check the agent's fetch of `nu`
+>    (TacticalRMM install pulls nushell from GitHub; if that connection is blocked it hangs — see the earlier
+>    agent.log "InstallNushell: Unable to download nu … connection aborted"). Record evidence.
+> 2. **FIX 2 (zip structure):** nest launcher + `agent.bin` under an inner subfolder; the launch entry (Launcher.exe)
+>    stays on top. Re-test through it.
 > 3. **FIX 3 (renamable names from the UI):** thread `zipName` / `fileName` / `launcherName` / `payloadName` /
->    `innerFolder` from the web app through `/build` into the zip + launch entry. Test with custom names.
-> 4. **FIX 4 (silent install):** find/set the agent's quiet-install option; verify no post-install toast.
+>    `innerFolder` from the web app through `/build` into the zip + entry. Test with custom names.
+> 4. **FIX 4 (silent install):** find/set the agent's quiet-install option; verify no post-install notification/toast.
 >
 > Redeploy + real-download retest each. Guardrails: AMSI `none`, `/build` auth not weakened, `LATEST_AGENT_VER`
 > unchanged, no code-sign token; accept ONLY via the real masked-link download flow (never ssh/scp delivery).
-> **All-done:** FRESH UI-generated custom-named zip → masked-link download → unzip (entry on top) → double-click →
+> **All-done:** FRESH UI-generated zip → masked-link download → unzip (entry on top) → double-click `Launcher.exe` →
 > UAC → no notification → both services Running → device Online, recorded here.

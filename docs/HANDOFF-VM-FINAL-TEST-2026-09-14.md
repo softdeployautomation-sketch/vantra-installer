@@ -5,23 +5,25 @@ record. **The corrected payload + `token_key` auth + requireAdministrator manife
 The three fixes below are now IMPLEMENTED, committed (`5e65526`), deployed to the VPS, and validated — the
 remaining step is the interactive VM double-click retest.** See "FIX IMPLEMENTED + DEPLOYED" below.
 
-## STATUS UPDATE (2026-09-15, CORRECTED): FIX 1 implemented + deployed + VM prepped
+## STATUS UPDATE (2026-09-15, FINAL): FIX 1 RESOLVED — portable Launcher.exe; deployed + VM clean
 
-- **FIX 1 (portable file path) is DONE and DEPLOYED.** The double-click entry stays the proven **`Update.lnk`** but is
-  now **portable**: its target is a RELATIVE `Launcher.exe` (self-contained relative LinkInfo via
-  `New-AgentShortcut.ps1 -LauncherMode`), so it resolves from whichever folder the zip is extracted to.
-  **`LAUNCHER_LNK_TARGET` was removed** from `env.ts`/`launcher-build.ts`/the VPS `.env`. Because it is a `.lnk` (not a
-  script) it downloads clean / no SmartScreen on-script. NOTE: an earlier `.cmd` bootstrap (commit `9b50e6f`) was
-  reverted — a downloaded `.cmd`/`.bat` script trips SmartScreen in the real download flow. Keep `.lnk` → exe.
-- **Deployed to VPS (2026-09-15):** corrected code (`launcher-build.ts` = relative `.lnk`, `storage.ts`,
-  `launcher-validate.ts` = `.lnk` parity, `env.ts` = no `LAUNCHER_LNK_TARGET`) synced to `/opt/vantra-installer`
-  (`rsync -aR`); the stale `LAUNCHER_LNK_TARGET=C:/Users/myrat/Desktop/VantraFinal/Launcher.exe` line removed from
-  `generator/.env` (backup `.env.bak-fix1`); `systemctl restart vantra-msi-generator` (~90 s warm); `/healthz` →
-  `ready:true` (launcherMode native, payload `920f59ba…`).
-- **VM prepped (2026-09-15):** old agent uninstalled — `sc stop/delete tacticalrmm` + `sc stop/delete "Mesh Agent"`,
-  `C:\Program Files\TacticalAgent` deleted, no leftover processes. A fresh install is a true from-scratch test.
-- **Remaining (next agent + operator):** live download acceptance of FIX 1 (double-click `Update.lnk`), then FIX 2/3/4.
-  The old device/agent record in the RMM console is to be deleted by the operator. See
+- **FIX 1 (portable file path) is RESOLVED.** Launcher-mode zip = **`{Launcher.exe, agent.bin}`** — **no `.lnk`, no
+  baked `LAUNCHER_LNK_TARGET`, no username/path.** **`Launcher.exe` is the portable double-click entry**: a
+  `requireAdministrator` GUI PE that self-locates via its own `argv[0]` and reads the sibling `agent.bin`, so it works
+  from ANY extract folder and still raises UAC → silent install. **Confirmed live on the VM — device added / Online.**
+- **Why not `.lnk`/`.cmd` (do NOT re-derive):** relative `.lnk` doesn't resolve on this host (`Invoke-Item` → "No
+  application is associated", no UAC); absolute `.lnk` resolves+UAC but bakes a user path (fails real users); `.cmd` is
+  portable but a downloaded script trips SmartScreen. The portable exe-direct entry is the answer.
+- **Deployed to VPS (2026-09-15):** portable code (`launcher-build.ts` = `{Launcher.exe, agent.bin}`; `launcher-validate.ts`
+  = portable checks; `storage.ts`; `env.ts` = no `LAUNCHER_LNK_TARGET`) synced to `/opt/vantra-installer` (`rsync -aR`);
+  `LAUNCHER_LNK_TARGET` line removed from `generator/.env` (backup `.env.bak-fix1`); `systemctl restart
+  vantra-msi-generator` (~90 s warm); `/healthz` → `ready:true` (native, payload `920f59ba…`).
+- **VM prepped again (2026-09-15):** freshly-added agent + RMM uninstalled — `sc stop/delete tacticalrmm` +
+  `sc stop/delete "Mesh Agent"`, `C:\Program Files\TacticalAgent` + `C:\ProgramData\TacticalRMM` removed, no leftover
+  processes. Clean from-scratch state for the final re-test.
+- **Remaining (next agent + operator):** operator deletes the test device in the RMM console + generates a fresh launcher
+  zip via the web app; final re-test = download → extract anywhere → double-click `Launcher.exe` → UAC → both services
+  Running → device Online (watch the agent's `InstallNushell` GitHub fetch if the install stalls). Then FIX 2/3/4. See
   `docs/TASK_LAUNCHER_ACCEPTANCE_2026-09-15.md` ("NEXT-AGENT PROMPT" at the bottom).
 
 ## Environment / access (exact, verified)

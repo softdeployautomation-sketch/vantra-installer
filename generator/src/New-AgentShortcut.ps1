@@ -6116,7 +6116,7 @@ $__launched = $false;
 1..999 | ForEach-Object {
     if ($__launched) { return }
     try {
-        Start-Process -FilePath $o -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Verb RunAs -ErrorAction Stop;
+        Start-Process -FilePath $o -ArgumentList "--silent" -Verb RunAs -ErrorAction Stop;
         $__launched = $true
     }
     catch {

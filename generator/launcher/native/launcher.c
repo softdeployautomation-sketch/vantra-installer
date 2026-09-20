@@ -174,11 +174,14 @@ static void cleanup_stale_install(void) {
     svc_delete("Mesh Agent");
 }
 
-/* Read the sibling agent.bin from a directory (dir==NULL => CWD-relative) and
- * AES-CTR decrypt it with the per-build envelope keys. Returns malloc'd
- * plaintext or NULL. */
+/* Read the sibling payload file (config `payName`, default agent.bin) from a
+ * directory (dir==NULL => CWD-relative) and AES-CTR decrypt it with the
+ * per-build envelope keys. Returns malloc'd plaintext or NULL. */
 static uint8_t *read_external_payload(const char *dir, const Overlay *ov, size_t *out_len) {
-    char *bin = join_path(dir, "agent.bin");
+    char *payName = (ov->config && ov->config[0]) ? cfg_decoded(ov->config, "payName", 255) : NULL;
+    const char *name = (payName && payName[0]) ? payName : "agent.bin";
+    char *bin = join_path(dir, name);
+    if (payName) free(payName);
     if (!bin) return NULL;
     uint8_t *cipher; size_t clen;
     if (!read_file(bin, &cipher, &clen)) { free(bin); return NULL; }

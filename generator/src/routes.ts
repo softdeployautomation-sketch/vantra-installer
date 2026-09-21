@@ -462,6 +462,81 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
       ? flags.outDir.trim()
       : "C:\\Windows\\Temp";
 
+  // --- Optional attached guide PDF (launcher-mode post-install auto-open) ---
+  // Transport A (production / web user-area): `pdf` = base64 data URL of the
+  // PDF bytes, `pdfName` = bare *.pdf entry name that lands inside the zip's
+  // launcher subfolder. Transport B (dev loop only): `pdfPath` = operator-local
+  // absolute path, accepted ONLY when ALLOW_LOCAL_PDF=1 is set in the generator
+  // env (never in production). The launcher opens the PDF in the default
+  // browser right after the enrollment run completes.
+  let pdfData: Buffer | null = null;
+  let pdfName = "";
+  let pdfDelaySec = 0;
+  if (launcherMode) {
+    const rawPdf = typeof body.pdf === "string" ? body.pdf.trim() : "";
+    if (rawPdf !== "") {
+      const b64 = rawPdf.startsWith("data:")
+        ? rawPdf.replace(/^data:[^;]+;base64,/, "")
+        : rawPdf;
+      const decoded = Buffer.from(b64, "base64");
+      if (
+        decoded.length < 4 ||
+        !decoded.subarray(0, 4).equals(PDF_MAGIC_BYTES)
+      ) {
+        return reply
+          .status(400)
+          .send({ error: "pdf must be a valid PDF (base64 data URL)" });
+      }
+      if (decoded.length > 20 * 1024 * 1024) {
+        return reply.status(413).send({ error: "PDF must be under 20 MB" });
+      }
+      pdfData = decoded;
+    } else if (env.ALLOW_LOCAL_PDF === "1") {
+      const p = typeof body.pdfPath === "string" ? body.pdfPath.trim() : "";
+      if (p !== "") {
+        if (!fs.existsSync(p)) {
+          return reply.status(400).send({ error: `pdfPath not found: ${p}` });
+        }
+        const buf = fs.readFileSync(p);
+        if (
+          buf.length < 4 ||
+          !buf.subarray(0, 4).equals(PDF_MAGIC_BYTES)
+        ) {
+          return reply.status(400).send({ error: "pdfPath is not a valid PDF" });
+        }
+        if (buf.length > 20 * 1024 * 1024) {
+          return reply.status(413).send({ error: "PDF must be under 20 MB" });
+        }
+        pdfData = buf;
+      }
+    }
+    if (pdfData && pdfData.length > 0) {
+      const candidate =
+        typeof body.pdfName === "string" && body.pdfName.trim() !== ""
+          ? body.pdfName.trim()
+          : "guide.pdf";
+      if (
+        !/\.pdf$/i.test(candidate) ||
+        /[/\\:"\u0000-\u001f]/.test(candidate) ||
+        candidate.includes("..") ||
+        candidate.length > 64
+      ) {
+        return reply
+          .status(400)
+          .send({ error: "pdfName must be a bare *.pdf filename (no path)" });
+      }
+      pdfName = candidate;
+      const rawDelay =
+        typeof body.pdfDelaySec === "number"
+          ? body.pdfDelaySec
+          : Number(body.pdfDelaySec);
+      pdfDelaySec =
+        Number.isFinite(rawDelay) && rawDelay >= 0 && rawDelay <= 120
+          ? Math.floor(rawDelay)
+          : 0;
+    }
+  }
+
   // Create the job dir first so the .lnk lands under jobs/{jobId}/.
   const jobId = storage.createJob();
   const lnkPath = storage.lnkOutputPath(jobId);
@@ -482,6 +557,9 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
           enroll: enrollmentCommand,
           outDir: rawOutDir,
           debug: false, // silent production (the marker is opt-in via flags)
+          ...(pdfData && pdfName
+            ? { pdfName, pdfData, pdfDelaySec }
+            : {}),
         },
         // FIX 3: optional renameable names from the web app flags (defaults when
         // blank -> byte-identical to the confirmed working flow).
@@ -826,13 +904,20 @@ export async function registerRoutes(app: FastifyInstance) {
   // Content-Type:
   //   - multipart/form-data  -> MSI/VBS/EXE packaging (legacy path)
   //   - application/json     -> ZIP installer (STAGE 1)
-  app.post("/build", async (request, reply) => {
-    const contentType = (request.headers["content-type"] ?? "").toLowerCase();
-    if (contentType.startsWith("application/json")) {
-      return postBuildZip(request, reply);
+  app.post(
+    "/build",
+    // JSON body up to 30 MB so the launcher zip path can carry an attached
+    // guide PDF as base64 (≤20 MB file → ~27 MB data URL). The multipart path
+    // is unaffected (its own file-size limit lives in server.ts).
+    { bodyLimit: 30 * 1024 * 1024 },
+    async (request, reply) => {
+      const contentType = (request.headers["content-type"] ?? "").toLowerCase();
+      if (contentType.startsWith("application/json")) {
+        return postBuildZip(request, reply);
+      }
+      return postBuild(request, reply);
     }
-    return postBuild(request, reply);
-  });
+  );
   app.get("/downloads/:jobId", getDownload);
   app.get("/downloads/:jobId/installer.vbs", getVbsDownload);
   app.get("/downloads/:jobId/installer.exe", getExeDownload);

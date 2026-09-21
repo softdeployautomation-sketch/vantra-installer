@@ -73,4 +73,10 @@ export const env = {
   // Warm launcher pool size (number of pre-compiled launcher variants kept).
   LAUNCHER_POOL_SIZE: number("LAUNCHER_POOL_SIZE", 30),
 
+  // Dev-loop helper (never set in production): when == "1", POST /build accepts
+  // an operator-local absolute `pdfPath` for the attached guide PDF so the
+  // localhost test harness can bake a file straight from disk (instead of the
+  // base64 `pdf` transport the web app uses).
+  ALLOW_LOCAL_PDF: optional("ALLOW_LOCAL_PDF", ""),
+
 };

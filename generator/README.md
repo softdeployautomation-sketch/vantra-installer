@@ -169,6 +169,15 @@ The zip (2 entries: `Update.lnk` 250 B + `Launcher.exe` ≈16 KB) is kept in
 are deleted right after zipping. `GET /downloads/<jobId>/zip` streams it
 while unexpired.
 
+Optional `downloadHost` (Task 74 — public/private download split): the web app
+passes `"downloadHost": "https://dl.broks.beauty"` for public-tier orgs; the
+generator allowlists it (`PUBLIC_DOWNLOAD_BASE_URL` env + the two known
+`dl.*` hosts; anything else falls back to `REDIRECT_BASE_URL || PUBLIC_URL`)
+and mints `downloadUrl`/`vbsUrl`/`exeUrl` on that host — including the host
+baked INSIDE the VBS payload. Omit it (private-tier) for today's default,
+byte-identical. Env: `PUBLIC_DOWNLOAD_BASE_URL` (optional, documents the
+expected public host for operators; built-in `dl.*` defaults apply when unset).
+
 ### Validation on every launcher build
 
 Each build runs the **18-row report card** — `New-AgentShortcut.ps1 -Validate`

@@ -51,6 +51,14 @@ export const env = {
   // <PUBLIC_URL>/downloads/<jobId>/zip.
   REDIRECT_BASE_URL: optional("REDIRECT_BASE_URL", ""),
 
+  // Task 74 (public/private download-host split): the PUBLIC-tier download
+  // host (e.g. https://dl.broks.beauty). The generator never tiers by itself —
+  // the Vantra web app passes `downloadHost` per build (validated against this
+  // allowlist); this env value only documents/centralizes the expected public
+  // host for operators. Empty = no allowlist entry from env (built-in defaults
+  // below still apply).
+  PUBLIC_DOWNLOAD_BASE_URL: optional("PUBLIC_DOWNLOAD_BASE_URL", ""),
+
   // ---- Launcher mode (WP2/WP3) ----
   // Path of the one-time imported agent exe (operator drop on the VPS). The
   // launcher mode NEVER fetches it at request time; the import happens at

